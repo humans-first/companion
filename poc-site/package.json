@@ -1,0 +1,13 @@
+{
+  "name": "companion-website",
+  "version": "1.0.0",
+  "description": "Companion - AI Growth Partner Website",
+  "main": "index.html",
+  "scripts": {
+    "dev": "python3 -m http.server 3000",
+    "start": "python3 -m http.server 8080"
+  },
+  "keywords": ["companion", "ai", "personal-development", "static-website"],
+  "author": "Companion Team",
+  "license": "MIT"
+}
