@@ -4,60 +4,77 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Companion - Your AI Growth Partner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="styles.css">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              'inter': ['Inter', 'sans-serif'],
+            },
+            colors: {
+              primary: '#6366f1',
+              'primary-dark': '#5856eb',
+            }
+          }
+        }
+      }
+    </script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/heroicons@2.0.18/24/outline/index.js" type="module"></script>
 </head>
-<body>
+<body class="font-inter">
     <!-- Navigation -->
-    <nav class="navbar">
-        <div class="nav-container">
-            <div class="nav-logo">
-                <h2>Companion</h2>
+    <nav class="fixed top-0 w-full bg-white/95 backdrop-blur-sm border-b border-gray-200 z-50 py-4">
+        <div class="max-w-6xl mx-auto px-5 flex justify-between items-center">
+            <div>
+                <h2 class="text-primary text-2xl font-bold">Companion</h2>
             </div>
-            <div class="nav-links">
-                <a href="#how-it-works">How It Works</a>
-                <a href="#examples">Examples</a>
-                <a href="#safety">Safety</a>
-                <a href="#contact" class="cta-button">Get Updates</a>
+            <div class="hidden md:flex gap-8 items-center">
+                <a href="#how-it-works" class="text-gray-600 font-medium hover:text-primary transition-colors">How It Works</a>
+                <a href="#examples" class="text-gray-600 font-medium hover:text-primary transition-colors">Examples</a>
+                <a href="#safety" class="text-gray-600 font-medium hover:text-primary transition-colors">Safety</a>
+                <a href="#contact" class="bg-primary text-white px-4 py-2 rounded-lg font-semibold hover:bg-primary-dark transition-colors">Get Updates</a>
             </div>
         </div>
     </nav>
 
     <!-- Hero Section -->
-    <section class="hero">
-        <div class="container">
-            <div class="hero-content">
-                <h1>Your AI companion that actually helps you grow</h1>
-                <p class="hero-subtitle">Finally, an AI that learns your journey and proactively helps you achieve your goals—without the constant explaining and generic advice.</p>
+    <section class="pt-32 pb-16 bg-gradient-to-br from-slate-50 to-slate-200">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="text-center max-w-4xl mx-auto">
+                <h1 class="text-5xl md:text-6xl font-bold text-slate-800 mb-6 leading-tight">Your AI companion that actually helps you grow</h1>
+                <p class="text-xl text-slate-600 mb-8 leading-relaxed">Finally, an AI that learns your journey and proactively helps you achieve your goals—without the constant explaining and generic advice.</p>
                 
-                <div class="hero-story">
-                    <div class="story-box">
-                        <p><strong>The story behind Companion:</strong> "As a parent of a 3-year-old, I found myself needing ongoing guidance that could understand the full context of our journey together. I realized millions of people face similar challenges where they need a companion that truly learns their situation and grows alongside them."</p>
-                        <cite>— Founder of Companion</cite>
+                <div class="my-8">
+                    <div class="bg-white p-8 rounded-2xl shadow-lg border-l-4 border-primary text-left max-w-2xl mx-auto">
+                        <p class="italic text-slate-600 mb-4"><strong>The story behind Companion:</strong> "As a parent of a 3-year-old, I found myself needing ongoing guidance that could understand the full context of our journey together. I realized millions of people face similar challenges where they need a companion that truly learns their situation and grows alongside them."</p>
+                        <cite class="text-primary font-semibold not-italic">— Founder of Companion</cite>
                     </div>
                 </div>
                 
-                <div class="hero-buttons">
-                    <a href="#how-it-works" class="primary-button">See How It Works</a>
-                    <a href="#examples" class="secondary-button">View Examples</a>
+                <div class="flex flex-col sm:flex-row gap-4 justify-center mt-8">
+                    <a href="#how-it-works" class="bg-primary text-white px-8 py-4 rounded-xl font-semibold hover:bg-primary-dark transform hover:-translate-y-1 transition-all shadow-lg hover:shadow-xl">See How It Works</a>
+                    <a href="#examples" class="bg-white text-primary px-8 py-4 rounded-xl font-semibold border-2 border-primary hover:bg-primary hover:text-white transform hover:-translate-y-1 transition-all">View Examples</a>
                 </div>
             </div>
             
-            <div class="hero-visual">
-                <div class="phone-mockup">
-                    <div class="phone-screen">
-                        <div class="companion-chat">
-                            <div class="chat-message companion">
-                                <div class="avatar">🤖</div>
-                                <div class="message">I noticed you've been consistent with bedtime routines this week. Your 3-year-old seems to be responding well. Want to try introducing the next sleep independence step?</div>
+            <div class="flex justify-center mt-16">
+                <div class="w-80 h-96 bg-slate-800 rounded-[2.5rem] p-5 shadow-2xl">
+                    <div class="w-full h-full bg-slate-50 rounded-[2rem] p-5 overflow-hidden">
+                        <div class="flex flex-col gap-4 h-full">
+                            <div class="flex gap-3 items-start">
+                                <div class="w-9 h-9 bg-primary rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">C</div>
+                                <div class="bg-white p-3 rounded-2xl max-w-[80%] text-sm shadow-sm">I noticed you've been consistent with bedtime routines this week. Your 3-year-old seems to be responding well. Want to try introducing the next sleep independence step?</div>
                             </div>
-                            <div class="chat-message user">
-                                <div class="message">Yes! What do you suggest?</div>
-                                <div class="avatar">👤</div>
+                            <div class="flex gap-3 items-start flex-row-reverse">
+                                <div class="w-9 h-9 bg-slate-600 rounded-full flex items-center justify-center text-white text-xs font-semibold flex-shrink-0">You</div>
+                                <div class="bg-primary text-white p-3 rounded-2xl max-w-[80%] text-sm">Yes! What do you suggest?</div>
                             </div>
-                            <div class="chat-message companion">
-                                <div class="avatar">🤖</div>
-                                <div class="message">Based on your journal entries, he's mastering the current routine. Let's try: "Mommy/Daddy will sit by the door instead of the bed." This maintains connection while building independence.</div>
+                            <div class="flex gap-3 items-start">
+                                <div class="w-9 h-9 bg-primary rounded-full flex items-center justify-center text-white text-sm font-semibold flex-shrink-0">C</div>
+                                <div class="bg-white p-3 rounded-2xl max-w-[80%] text-sm shadow-sm">Based on your journal entries, he's mastering the current routine. Let's try: "Mommy/Daddy will sit by the door instead of the bed." This maintains connection while building independence.</div>
                             </div>
                         </div>
                     </div>
@@ -67,79 +84,107 @@
     </section>
 
     <!-- Problem Section -->
-    <section class="problem-section">
-        <div class="container">
-            <div class="section-header">
-                <h2>Tired of AI that doesn't "get" you?</h2>
-                <p>We've all been there with current AI tools...</p>
+    <section class="py-20 bg-white">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl md:text-5xl font-bold text-slate-800 mb-4">Tired of AI that doesn't "get" you?</h2>
+                <p class="text-lg text-slate-600">We've all been there with current AI tools...</p>
             </div>
             
-            <div class="problem-grid">
-                <div class="problem-card">
-                    <div class="problem-icon">😤</div>
-                    <h3>Constantly explaining yourself</h3>
-                    <p>"Tell me about your 3-year-old again..." Every. Single. Time.</p>
+            <div class="grid md:grid-cols-2 gap-8 mt-8 mb-8">
+                <div class="bg-gradient-to-br from-orange-50 to-amber-50 p-8 rounded-2xl text-left border border-orange-200 relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-24 h-24 bg-orange-100 rounded-full -translate-x-8 -translate-y-8 opacity-50"></div>
+                    <div class="flex items-center gap-4 mb-4 relative z-10">
+                        <div class="w-10 h-10 bg-gradient-to-br from-orange-500 to-orange-600 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-orange-900">Constantly explaining yourself</h3>
+                    </div>
+                    <p class="text-amber-800 italic relative z-10">"Tell me about your 3-year-old again..." Every. Single. Time.</p>
                 </div>
                 
-                <div class="problem-card">
-                    <div class="problem-icon">🤖</div>
-                    <h3>Generic, robotic advice</h3>
-                    <p>Cookie-cutter responses that don't fit your unique situation.</p>
+                <div class="bg-gradient-to-br from-orange-50 to-amber-50 p-8 rounded-2xl text-left border border-orange-200 relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-24 h-24 bg-orange-100 rounded-full -translate-x-8 -translate-y-8 opacity-50"></div>
+                    <div class="flex items-center gap-4 mb-4 relative z-10">
+                        <div class="w-10 h-10 bg-gradient-to-br from-amber-500 to-orange-500 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-orange-900">Generic, robotic advice</h3>
+                    </div>
+                    <p class="text-amber-800 italic relative z-10">Cookie-cutter responses that don't fit your unique situation.</p>
                 </div>
                 
-                <div class="problem-card">
-                    <div class="problem-icon">📱</div>
-                    <h3>Another app to remember</h3>
-                    <p>You have to remember to open it and ask the right questions.</p>
+                <div class="bg-gradient-to-br from-orange-50 to-amber-50 p-8 rounded-2xl text-left border border-orange-200 relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-24 h-24 bg-orange-100 rounded-full -translate-x-8 -translate-y-8 opacity-50"></div>
+                    <div class="flex items-center gap-4 mb-4 relative z-10">
+                        <div class="w-10 h-10 bg-gradient-to-br from-yellow-500 to-amber-500 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 0 0 6 3.75v16.5a2.25 2.25 0 0 0 2.25 2.25h7.5A2.25 2.25 0 0 0 18 20.25V3.75a2.25 2.25 0 0 0-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-orange-900">Another app to remember</h3>
+                    </div>
+                    <p class="text-amber-800 italic relative z-10">You have to remember to open it and ask the right questions.</p>
                 </div>
                 
-                <div class="problem-card">
-                    <div class="problem-icon">🏃‍♀️</div>
-                    <h3>No real progress</h3>
-                    <p>Lots of advice, but you're still stuck in the same patterns.</p>
+                <div class="bg-gradient-to-br from-orange-50 to-amber-50 p-8 rounded-2xl text-left border border-orange-200 relative overflow-hidden">
+                    <div class="absolute top-0 left-0 w-24 h-24 bg-orange-100 rounded-full -translate-x-8 -translate-y-8 opacity-50"></div>
+                    <div class="flex items-center gap-4 mb-4 relative z-10">
+                        <div class="w-10 h-10 bg-gradient-to-br from-lime-500 to-green-500 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728L5.636 5.636m12.728 12.728L12 21l-3.636-3.636m3.636-3.636 3.636 3.636M21 12l-3.636-3.636m0 0L12 3l-5.364 5.364" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-orange-900">No real progress</h3>
+                    </div>
+                    <p class="text-amber-800 italic relative z-10">Lots of advice, but you're still stuck in the same patterns.</p>
                 </div>
             </div>
         </div>
     </section>
 
     <!-- Solution Section -->
-    <section class="solution-section" id="how-it-works">
-        <div class="container">
-            <div class="section-header">
-                <h2>What if your AI actually knew you?</h2>
-                <p>Companion works backwards from your goals to give you the support you actually need.</p>
+    <section class="py-20 bg-gradient-to-br from-blue-50 to-cyan-50" id="how-it-works">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl md:text-5xl font-bold text-slate-800 mb-4">What if your AI actually knew you?</h2>
+                <p class="text-lg text-slate-600">Companion works backwards from your goals to give you the support you actually need.</p>
             </div>
             
-            <div class="solution-steps">
-                <div class="step">
-                    <div class="step-number">1</div>
-                    <div class="step-content">
-                        <h3>Set Your Goal</h3>
-                        <p>Tell Companion what you want to achieve - better parenting, career growth, health improvement, or any personal goal.</p>
+            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8 mt-12">
+                <div class="bg-white p-8 rounded-2xl shadow-lg text-center relative">
+                    <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-primary text-white rounded-full flex items-center justify-center font-bold text-sm">1</div>
+                    <div class="mt-4">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Set Your Goal</h3>
+                        <p class="text-slate-600 leading-relaxed">Tell Companion what you want to achieve - better parenting, career growth, health improvement, or any personal goal.</p>
                     </div>
                 </div>
                 
-                <div class="step">
-                    <div class="step-number">2</div>
-                    <div class="step-content">
-                        <h3>Choose Your Companions</h3>
-                        <p>Pick specialized AI companions created by real experts. Mix and match them like building your personal advisory team.</p>
+                <div class="bg-white p-8 rounded-2xl shadow-lg text-center relative">
+                    <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-primary text-white rounded-full flex items-center justify-center font-bold text-sm">2</div>
+                    <div class="mt-4">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Choose Your Companions</h3>
+                        <p class="text-slate-600 leading-relaxed">Pick specialized AI companions created by real experts. Mix and match them like building your personal advisory team.</p>
                     </div>
                 </div>
                 
-                <div class="step">
-                    <div class="step-number">3</div>
-                    <div class="step-content">
-                        <h3>Live Your Life</h3>
-                        <p>Journal naturally, share photos, or just quick voice notes. Companion learns your patterns without you thinking about it.</p>
+                <div class="bg-white p-8 rounded-2xl shadow-lg text-center relative">
+                    <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-primary text-white rounded-full flex items-center justify-center font-bold text-sm">3</div>
+                    <div class="mt-4">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Live Your Life</h3>
+                        <p class="text-slate-600 leading-relaxed">Journal naturally, share photos, or just quick voice notes. Companion learns your patterns without you thinking about it.</p>
                     </div>
                 </div>
                 
-                <div class="step">
-                    <div class="step-number">4</div>
-                    <div class="step-content">
-                        <h3>Get Proactive Help</h3>
-                        <p>Receive insights, suggestions, and reminders exactly when you need them - no prompting required.</p>
+                <div class="bg-white p-8 rounded-2xl shadow-lg text-center relative">
+                    <div class="absolute -top-4 left-1/2 transform -translate-x-1/2 w-8 h-8 bg-primary text-white rounded-full flex items-center justify-center font-bold text-sm">4</div>
+                    <div class="mt-4">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Get Proactive Help</h3>
+                        <p class="text-slate-600 leading-relaxed">Receive insights, suggestions, and reminders exactly when you need them - no prompting required.</p>
                     </div>
                 </div>
             </div>
@@ -147,71 +192,71 @@
     </section>
 
     <!-- Examples Section -->
-    <section class="examples-section" id="examples">
-        <div class="container">
-            <div class="section-header">
-                <h2>See Companion in action</h2>
-                <p>Real scenarios where Companion makes a difference</p>
+    <section class="py-20 bg-white" id="examples">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl md:text-5xl font-bold text-slate-800 mb-4">See Companion in action</h2>
+                <p class="text-lg text-slate-600">Real scenarios where Companion makes a difference</p>
             </div>
             
-            <div class="examples-grid">
-                <div class="example-card">
-                    <div class="example-header">
-                        <h3>👨‍👩‍👧‍👦 Better Parenting</h3>
-                        <div class="companions-used">
-                            <span class="companion-tag">Child Development Expert</span>
-                            <span class="companion-tag">Family Communication Coach</span>
+            <div class="grid md:grid-cols-2 gap-8 mt-12">
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8 hover:shadow-xl hover:-translate-y-2 transition-all duration-300">
+                    <div class="mb-6">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Better Parenting</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Child Development Expert</span>
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Family Communication Coach</span>
                         </div>
                     </div>
-                    <div class="example-scenario">
-                        <p><strong>Your situation:</strong> 3-year-old having daily meltdowns</p>
-                        <p><strong>What Companion notices:</strong> Meltdowns happen at 4pm when he's hungry and overstimulated</p>
-                        <p><strong>Proactive suggestion:</strong> "Try an earlier snack and quiet time at 3:30pm. Based on your patterns, this could prevent 80% of the meltdowns."</p>
+                    <div class="space-y-4">
+                        <p class="text-slate-600"><strong class="text-slate-800">Your situation:</strong> 3-year-old having daily meltdowns</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">What Companion notices:</strong> Meltdowns happen at 4pm when he's hungry and overstimulated</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">Proactive suggestion:</strong> "Try an earlier snack and quiet time at 3:30pm. Based on your patterns, this could prevent 80% of the meltdowns."</p>
                     </div>
                 </div>
                 
-                <div class="example-card">
-                    <div class="example-header">
-                        <h3>💪 Health & Fitness</h3>
-                        <div class="companions-used">
-                            <span class="companion-tag">Nutrition Specialist</span>
-                            <span class="companion-tag">Exercise Coach</span>
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8 hover:shadow-xl hover:-translate-y-2 transition-all duration-300">
+                    <div class="mb-6">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Health & Fitness</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Nutrition Specialist</span>
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Exercise Coach</span>
                         </div>
                     </div>
-                    <div class="example-scenario">
-                        <p><strong>Your situation:</strong> Want to lose weight but keep falling off track</p>
-                        <p><strong>What Companion notices:</strong> You're more successful when you prep meals on Sunday and exercise in the morning</p>
-                        <p><strong>Proactive suggestion:</strong> "It's Thursday and you haven't planned Sunday prep. Want me to suggest a 30-minute meal prep plan based on what worked before?"</p>
+                    <div class="space-y-4">
+                        <p class="text-slate-600"><strong class="text-slate-800">Your situation:</strong> Want to lose weight but keep falling off track</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">What Companion notices:</strong> You're more successful when you prep meals on Sunday and exercise in the morning</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">Proactive suggestion:</strong> "It's Thursday and you haven't planned Sunday prep. Want me to suggest a 30-minute meal prep plan based on what worked before?"</p>
                     </div>
                 </div>
                 
-                <div class="example-card">
-                    <div class="example-header">
-                        <h3>🚀 Career Growth</h3>
-                        <div class="companions-used">
-                            <span class="companion-tag">Career Coach</span>
-                            <span class="companion-tag">Skill Development Mentor</span>
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8 hover:shadow-xl hover:-translate-y-2 transition-all duration-300">
+                    <div class="mb-6">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Career Growth</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Career Coach</span>
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Skill Development Mentor</span>
                         </div>
                     </div>
-                    <div class="example-scenario">
-                        <p><strong>Your situation:</strong> Want to transition to a leadership role</p>
-                        <p><strong>What Companion notices:</strong> You've successfully led 3 projects but haven't documented your impact</p>
-                        <p><strong>Proactive suggestion:</strong> "Your manager's quarterly review is next week. Let's create a leadership impact summary based on your recent wins."</p>
+                    <div class="space-y-4">
+                        <p class="text-slate-600"><strong class="text-slate-800">Your situation:</strong> Want to transition to a leadership role</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">What Companion notices:</strong> You've successfully led 3 projects but haven't documented your impact</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">Proactive suggestion:</strong> "Your manager's quarterly review is next week. Let's create a leadership impact summary based on your recent wins."</p>
                     </div>
                 </div>
                 
-                <div class="example-card">
-                    <div class="example-header">
-                        <h3>🧘 Mental Wellness</h3>
-                        <div class="companions-used">
-                            <span class="companion-tag">Mindfulness Coach</span>
-                            <span class="companion-tag">Stress Management Expert</span>
+                <div class="bg-slate-50 border border-slate-200 rounded-2xl p-8 hover:shadow-xl hover:-translate-y-2 transition-all duration-300">
+                    <div class="mb-6">
+                        <h3 class="text-xl font-semibold text-slate-800 mb-4">Mental Wellness</h3>
+                        <div class="flex flex-wrap gap-2">
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Mindfulness Coach</span>
+                            <span class="bg-primary text-white px-3 py-1 rounded-full text-xs font-medium">Stress Management Expert</span>
                         </div>
                     </div>
-                    <div class="example-scenario">
-                        <p><strong>Your situation:</strong> Feeling overwhelmed and anxious</p>
-                        <p><strong>What Companion notices:</strong> Your stress peaks on Tuesdays (meeting-heavy days) and improves with morning walks</p>
-                        <p><strong>Proactive suggestion:</strong> "Tomorrow's Tuesday. Want to try a 10-minute morning walk before your first meeting? It's helped reduce your Tuesday stress by 60%."</p>
+                    <div class="space-y-4">
+                        <p class="text-slate-600"><strong class="text-slate-800">Your situation:</strong> Feeling overwhelmed and anxious</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">What Companion notices:</strong> Your stress peaks on Tuesdays (meeting-heavy days) and improves with morning walks</p>
+                        <p class="text-slate-600"><strong class="text-slate-800">Proactive suggestion:</strong> "Tomorrow's Tuesday. Want to try a 10-minute morning walk before your first meeting? It's helped reduce your Tuesday stress by 60%."</p>
                     </div>
                 </div>
             </div>
@@ -219,93 +264,121 @@
     </section>
 
     <!-- Safety Section -->
-    <section class="safety-section" id="safety">
-        <div class="container">
-            <div class="section-header">
-                <h2>Built with your safety in mind</h2>
-                <p>We've learned from other AI platforms' mistakes</p>
+    <section class="py-20 bg-gradient-to-br from-green-50 to-emerald-50" id="safety">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="text-center mb-12">
+                <h2 class="text-4xl md:text-5xl font-bold text-slate-800 mb-4">Built with your safety in mind</h2>
+                <p class="text-lg text-slate-600">We've learned from other AI platforms' mistakes</p>
             </div>
             
-            <div class="safety-features">
-                <div class="safety-card">
-                    <div class="safety-icon">🛡️</div>
-                    <h3>Professional Standards</h3>
-                    <p>All companions are created by licensed professionals and experts, not just AI enthusiasts.</p>
+            <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-8 mt-12">
+                <div class="bg-white p-8 rounded-2xl text-left shadow-lg border border-green-100">
+                    <div class="flex items-center gap-4 mb-4">
+                        <div class="w-10 h-10 bg-gradient-to-br from-emerald-500 to-green-600 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-emerald-800">Professional Standards</h3>
+                    </div>
+                    <p class="text-emerald-700 leading-relaxed">All companions are created by licensed professionals and experts, not just AI enthusiasts.</p>
                 </div>
                 
-                <div class="safety-card">
-                    <div class="safety-icon">🚨</div>
-                    <h3>Clear Boundaries</h3>
-                    <p>Companion knows what it can and can't help with. It will refer you to real professionals when needed.</p>
+                <div class="bg-white p-8 rounded-2xl text-left shadow-lg border border-green-100">
+                    <div class="flex items-center gap-4 mb-4">
+                        <div class="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-500 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0-10.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.75c0 5.592 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.57-.598-3.75h-.152c-3.196 0-6.1-1.25-8.25-3.286Zm0 13.036h.008v.008H12v-.008Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-emerald-800">Clear Boundaries</h3>
+                    </div>
+                    <p class="text-emerald-700 leading-relaxed">Companion knows what it can and can't help with. It will refer you to real professionals when needed.</p>
                 </div>
                 
-                <div class="safety-card">
-                    <div class="safety-icon">🔒</div>
-                    <h3>Your Data, Your Control</h3>
-                    <p>Your personal information stays yours. No selling to advertisers, no training other AIs with your data.</p>
+                <div class="bg-white p-8 rounded-2xl text-left shadow-lg border border-green-100">
+                    <div class="flex items-center gap-4 mb-4">
+                        <div class="w-10 h-10 bg-gradient-to-br from-purple-500 to-violet-600 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-emerald-800">Your Data, Your Control</h3>
+                    </div>
+                    <p class="text-emerald-700 leading-relaxed">Your personal information stays yours. No selling to advertisers, no training other AIs with your data.</p>
                 </div>
                 
-                <div class="safety-card">
-                    <div class="safety-icon">👥</div>
-                    <h3>Human Oversight</h3>
-                    <p>Real experts monitor companion interactions to ensure quality and safety standards.</p>
+                <div class="bg-white p-8 rounded-2xl text-left shadow-lg border border-green-100">
+                    <div class="flex items-center gap-4 mb-4">
+                        <div class="w-10 h-10 bg-gradient-to-br from-amber-500 to-orange-500 rounded-lg flex items-center justify-center text-white flex-shrink-0">
+                            <svg class="w-5 h-5 stroke-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+                            </svg>
+                        </div>
+                        <h3 class="text-xl font-semibold text-emerald-800">Human Oversight</h3>
+                    </div>
+                    <p class="text-emerald-700 leading-relaxed">Real experts monitor companion interactions to ensure quality and safety standards.</p>
                 </div>
             </div>
             
-            <div class="safety-commitment">
-                <div class="commitment-box">
-                    <h4>Our Promise</h4>
-                    <p>Companion will never replace human relationships or professional services. We're here to enhance your growth journey, not control it. If you need serious help, we'll connect you with the right human professionals.</p>
+            <div class="mt-12 text-center">
+                <div class="bg-white p-8 rounded-2xl max-w-2xl mx-auto border-2 border-emerald-600">
+                    <h4 class="text-emerald-600 text-xl font-semibold mb-4">Our Promise</h4>
+                    <p class="text-emerald-700 leading-relaxed">Companion will never replace human relationships or professional services. We're here to enhance your growth journey, not control it. If you need serious help, we'll connect you with the right human professionals.</p>
                 </div>
             </div>
         </div>
     </section>
 
     <!-- CTA Section -->
-    <section class="cta-section" id="contact">
-        <div class="container">
-            <div class="cta-content">
-                <h2>Ready to meet your Companion?</h2>
-                <p>Join our early access list and be among the first to experience AI that actually helps you grow.</p>
+    <section class="py-20 bg-slate-800 text-white text-center" id="contact">
+        <div class="max-w-6xl mx-auto px-5">
+            <div>
+                <h2 class="text-4xl md:text-5xl font-bold mb-4">Ready to meet your Companion?</h2>
+                <p class="text-lg text-slate-300 mb-8">Join our early access list and be among the first to experience AI that actually helps you grow.</p>
                 
-                <form class="email-signup" action="#" method="POST">
-                    <input type="email" placeholder="Enter your email" required>
-                    <button type="submit">Get Early Access</button>
+                <form class="flex flex-col sm:flex-row gap-4 justify-center mb-8 max-w-lg mx-auto" action="#" method="POST">
+                    <input type="email" placeholder="Enter your email" required class="flex-1 px-4 py-4 rounded-lg text-slate-800 text-base">
+                    <button type="submit" class="bg-primary text-white px-8 py-4 rounded-lg font-semibold hover:bg-primary-dark transition-colors">Get Early Access</button>
                 </form>
                 
-                <div class="launch-info">
-                    <p>🚀 <strong>Launching Spring 2025</strong></p>
-                    <p>✨ Early access members get 3 months free</p>
+                <div class="text-slate-300">
+                    <p class="mb-2"><strong>Launching Spring 2025</strong></p>
+                    <p>Early access members get 3 months free</p>
                 </div>
             </div>
         </div>
     </section>
 
     <!-- Footer -->
-    <footer class="footer">
-        <div class="container">
-            <div class="footer-content">
-                <div class="footer-section">
-                    <h3>Companion</h3>
-                    <p>AI that puts people first</p>
+    <footer class="bg-slate-900 text-white py-12">
+        <div class="max-w-6xl mx-auto px-5">
+            <div class="grid md:grid-cols-3 gap-8 mb-8">
+                <div>
+                    <h3 class="text-primary text-xl font-semibold mb-4">Companion</h3>
+                    <p class="text-slate-300">AI that puts people first</p>
                 </div>
                 
-                <div class="footer-section">
-                    <h4>Product</h4>
-                    <a href="#how-it-works">How It Works</a>
-                    <a href="#examples">Examples</a>
-                    <a href="#safety">Safety</a>
+                <div>
+                    <h4 class="text-primary text-lg font-semibold mb-4">Product</h4>
+                    <div class="space-y-2">
+                        <a href="#how-it-works" class="block text-slate-300 hover:text-primary transition-colors">How It Works</a>
+                        <a href="#examples" class="block text-slate-300 hover:text-primary transition-colors">Examples</a>
+                        <a href="#safety" class="block text-slate-300 hover:text-primary transition-colors">Safety</a>
+                    </div>
                 </div>
                 
-                <div class="footer-section">
-                    <h4>Contact</h4>
-                    <a href="mailto:hello@companion.ai">hello@companion.ai</a>
-                    <a href="#contact">Early Access</a>
+                <div>
+                    <h4 class="text-primary text-lg font-semibold mb-4">Contact</h4>
+                    <div class="space-y-2">
+                        <a href="mailto:hello@companion.ai" class="block text-slate-300 hover:text-primary transition-colors">hello@companion.ai</a>
+                        <a href="#contact" class="block text-slate-300 hover:text-primary transition-colors">Early Access</a>
+                    </div>
                 </div>
             </div>
             
-            <div class="footer-bottom">
-                <p>&copy; 2024 Companion. Building the future of AI companionship.</p>
+            <div class="border-t border-slate-700 pt-4 text-center">
+                <p class="text-slate-500">&copy; 2024 Companion. Building the future of AI companionship.</p>
             </div>
         </div>
     </footer>
