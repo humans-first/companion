@@ -1,5 +1,3 @@
-import functools
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,8 +30,3 @@ class Settings(BaseSettings):
     @property
     def acp_server_argv(self) -> list[str]:
         return self.acp_server_cmd.split()
-
-
-@functools.cache
-def get_settings() -> Settings:
-    return Settings()

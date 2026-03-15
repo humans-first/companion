@@ -12,10 +12,15 @@ In groups: responds only when @mentioned or when replying to the bot's message.
 In private chats: responds to every message.
 """
 
+from __future__ import annotations
+
+import argparse
 import logging
+import time
 
 from acp import text_block
-from telegram import Update
+from opentelemetry import metrics, trace
+from telegram import Chat, Message, Update, User
 from telegram.constants import ChatAction, ChatType
 from telegram.ext import (
     Application,
@@ -25,10 +30,31 @@ from telegram.ext import (
     filters,
 )
 
+from telegram_acp import __version__
 from telegram_acp.acp import ACPManager
-from telegram_acp.config import get_settings
+from telegram_acp.config import Settings
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer("telegram_acp.main")
+meter = metrics.get_meter("telegram_acp.main")
+
+messages_received = meter.create_counter(
+    "telegram.messages.received",
+    description="Total messages received from Telegram",
+)
+responses_sent = meter.create_counter(
+    "telegram.responses.sent",
+    description="Total responses sent back to Telegram",
+)
+response_failures = meter.create_counter(
+    "telegram.responses.failures",
+    description="Total failed response attempts",
+)
+response_duration = meter.create_histogram(
+    "telegram.response.duration",
+    unit="s",
+    description="End-to-end time from receiving a message to sending the response",
+)
 
 # Initialized in main() after settings are loaded
 _acp: ACPManager | None = None
@@ -47,15 +73,15 @@ def strip_mention(text: str, bot_username: str) -> str:
     return text.replace(mention, "").strip()
 
 
-def _build_chat_header(chat) -> str:
+def _build_chat_header(chat: Chat) -> str:
     """Build a [Chat: ...] header for group context."""
-    if chat.type in (ChatType.PRIVATE,):
+    if chat.type == ChatType.PRIVATE:
         return ""
     title = chat.title or "Untitled"
     return f'[Chat: "{title}" | {chat.type}]\n'
 
 
-def _build_reply_context(reply_msg, bot_id: int) -> str:
+def _build_reply_context(reply_msg: Message | None, bot_id: int) -> str:
     """Build a [Replying to ...] line if the message is a reply."""
     if not reply_msg or not reply_msg.text:
         return ""
@@ -75,101 +101,170 @@ def _build_reply_context(reply_msg, bot_id: int) -> str:
 
 
 async def cmd_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not allowed(update.effective_chat.id):
+    chat = _get_chat(update)
+    msg = _get_message(update)
+    user = _get_user(update)
+    if not allowed(chat.id):
         return
-    await update.message.reply_text(
-        f"Hey {update.effective_user.first_name}. Send me a message."
-    )
+    await msg.reply_text(f"Hey {user.first_name}. Send me a message.")
 
 
 async def cmd_reset(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not allowed(update.effective_chat.id):
+    chat = _get_chat(update)
+    msg = _get_message(update)
+    if not allowed(chat.id):
         return
-    await _acp.reset(update.effective_chat.id)
-    await update.message.reply_text("Session reset.")
+    assert _acp is not None
+    await _acp.reset(chat.id)
+    await msg.reply_text("Session reset.")
 
 
 async def cmd_chatid(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    cid = update.effective_chat.id
-    await update.message.reply_text(f"Chat ID: `{cid}`", parse_mode="Markdown")
+    chat = _get_chat(update)
+    msg = _get_message(update)
+    await msg.reply_text(f"Chat ID: `{chat.id}`", parse_mode="Markdown")
 
 
 async def _track_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Track the latest message ID per chat (runs on every message via group=-1)."""
-    _last_seen_msg[update.effective_chat.id] = update.message.message_id
+    chat = _get_chat(update)
+    msg = _get_message(update)
+    _last_seen_msg[chat.id] = msg.message_id
 
 
 async def _respond(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Build enriched prompt, send to ACP, reply with the result."""
-    chat = update.effective_chat
+    assert _acp is not None
+    chat = _get_chat(update)
+    msg = _get_message(update)
+    user = _get_user(update)
     chat_id = chat.id
-    user = update.effective_user
     display_name = user.full_name or user.username or str(user.id)
 
-    await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    with tracer.start_as_current_span(
+        "telegram.respond",
+        attributes={
+            "chat.id": chat_id,
+            "chat.type": str(chat.type),
+            "user.display_name": display_name,
+        },
+    ) as span:
+        t0 = time.monotonic()
+        attrs = {"chat.type": str(chat.type)}
+        await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
-    # Build enriched prompt
-    header = _build_chat_header(chat)
-    reply_ctx = _build_reply_context(update.message.reply_to_message, ctx.bot.id)
-    prompt = f"{header}{reply_ctx}[{display_name}]: {text}"
+        # Build enriched prompt
+        header = _build_chat_header(chat)
+        reply_ctx = _build_reply_context(msg.reply_to_message, ctx.bot.id)
+        prompt = f"{header}{reply_ctx}[{display_name}]: {text}"
 
-    try:
-        full = ""
-        async for chunk in _acp.prompt(chat_id, [text_block(prompt)]):
-            full += chunk
+        try:
+            full = ""
+            async for chunk in _acp.prompt(chat_id, [text_block(prompt)]):
+                full += chunk
 
-        if not full.strip():
-            return
+            if not full.strip():
+                span.set_attribute("telegram.empty_response", True)
+                return
 
-        parts = [full[i : i + 4096] for i in range(0, len(full), 4096)]
+            parts = [full[i : i + 4096] for i in range(0, len(full), 4096)]
+            span.set_attribute("telegram.response_length", len(full))
+            span.set_attribute("telegram.response_parts", len(parts))
 
-        # Reply with threading only if other messages arrived since the trigger
-        is_latest = _last_seen_msg.get(chat_id) == update.message.message_id
-        if is_latest:
-            await ctx.bot.send_message(chat_id, parts[0])
-            for part in parts[1:]:
-                await ctx.bot.send_message(chat_id, part)
-        else:
-            await update.message.reply_text(parts[0])
-            for part in parts[1:]:
-                await update.message.reply_text(part)
+            # Reply with threading only if other messages arrived since the trigger
+            is_latest = _last_seen_msg.get(chat_id) == msg.message_id
+            span.set_attribute("telegram.threaded", not is_latest)
+            if is_latest:
+                await ctx.bot.send_message(chat_id, parts[0])
+                for part in parts[1:]:
+                    await ctx.bot.send_message(chat_id, part)
+            else:
+                await msg.reply_text(parts[0])
+                for part in parts[1:]:
+                    await msg.reply_text(part)
 
-    except Exception:
-        logger.exception("Error handling message from chat %d", chat_id)
-        await update.message.reply_text("Something went wrong. Try /reset and send again.")
-        await _acp.reset(chat_id)
+            responses_sent.add(1, attrs)
+
+        except Exception as exc:
+            span.set_status(trace.StatusCode.ERROR)
+            span.record_exception(exc)
+            response_failures.add(1, attrs)
+            logger.exception("Error handling message from chat %d", chat_id)
+            await msg.reply_text("Something went wrong. Try /reset and send again.")
+            await _acp.reset(chat_id)
+
+        finally:
+            response_duration.record(time.monotonic() - t0, attrs)
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.debug(
-        "incoming message chat=%s type=%s text=%r",
-        update.effective_chat.id,
-        update.effective_chat.type,
-        (update.message.text or "")[:120],
-    )
+    chat = _get_chat(update)
+    msg = _get_message(update)
 
-    if not allowed(update.effective_chat.id):
-        return
-
-    text = update.message.text or ""
-    chat_type = update.effective_chat.type
-
-    # In groups: respond when @mentioned OR when replying to the bot's own message
-    if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
-        bot_username = ctx.bot.username
-        mentioned = f"@{bot_username}".lower() in text.lower()
-        replied_to_bot = (
-            update.message.reply_to_message is not None
-            and update.message.reply_to_message.from_user is not None
-            and update.message.reply_to_message.from_user.id == ctx.bot.id
+    with tracer.start_as_current_span(
+        "telegram.handle_message",
+        attributes={
+            "chat.id": chat.id,
+            "chat.type": str(chat.type),
+        },
+    ) as span:
+        logger.debug(
+            "incoming message chat=%s type=%s text=%r",
+            chat.id,
+            chat.type,
+            (msg.text or "")[:120],
         )
-        if not mentioned and not replied_to_bot:
-            return
-        text = strip_mention(text, bot_username)
-        if not text:
+
+        messages_received.add(1, {"chat.type": str(chat.type)})
+
+        if not allowed(chat.id):
+            span.set_attribute("telegram.action", "blocked_by_allowlist")
             return
 
-    await _respond(update, ctx, text)
+        text = msg.text or ""
+        chat_type = chat.type
+
+        # In groups: respond when @mentioned OR when replying to the bot's own message
+        if chat_type in (ChatType.GROUP, ChatType.SUPERGROUP):
+            bot_username = ctx.bot.username
+            mentioned = f"@{bot_username}".lower() in text.lower()
+            replied_to_bot = (
+                msg.reply_to_message is not None
+                and msg.reply_to_message.from_user is not None
+                and msg.reply_to_message.from_user.id == ctx.bot.id
+            )
+            if not mentioned and not replied_to_bot:
+                span.set_attribute("telegram.action", "ignored_group_message")
+                return
+            text = strip_mention(text, bot_username)
+            if not text:
+                span.set_attribute("telegram.action", "empty_after_strip")
+                return
+            span.set_attribute("telegram.action", "group_respond")
+        else:
+            span.set_attribute("telegram.action", "private_respond")
+
+        await _respond(update, ctx, text)
+
+
+# ------------------------------------------------------------------ #
+# Helpers                                                              #
+# ------------------------------------------------------------------ #
+
+
+def _get_chat(update: Update) -> Chat:
+    assert update.effective_chat is not None
+    return update.effective_chat
+
+
+def _get_message(update: Update) -> Message:
+    assert update.message is not None
+    return update.message
+
+
+def _get_user(update: Update) -> User:
+    assert update.effective_user is not None
+    return update.effective_user
 
 
 # ------------------------------------------------------------------ #
@@ -177,7 +272,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 # ------------------------------------------------------------------ #
 
 
-async def post_init(app: Application) -> None:
+async def post_init(_app: Application) -> None:  # type: ignore[type-arg]
+    assert _acp is not None
     await _acp.start()
     logger.info(
         "Bot started. Allowed chats: %s",
@@ -185,14 +281,46 @@ async def post_init(app: Application) -> None:
     )
 
 
-async def post_shutdown(app: Application) -> None:
+async def post_shutdown(_app: Application) -> None:  # type: ignore[type-arg]
+    assert _acp is not None
     await _acp.stop()
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="telegram-acp",
+        description="Bridge a Telegram bot to an ACP-compatible agent.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--token", help="Telegram bot token (env: TELEGRAM_TOKEN)")
+    parser.add_argument("--acp-cmd", help="ACP server command (env: ACP_SERVER_CMD)")
+    parser.add_argument("--session-mode", help="ACP session mode (env: ACP_SESSION_MODE)")
+    parser.add_argument("--allowed-chats", help="Comma-separated chat IDs (env: ALLOWED_CHATS)")
+    parser.add_argument(
+        "--debug", action="store_true", default=None, help="Log raw ACP messages (env: DEBUG_ACP)"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
     global _acp, _allowed
 
-    settings = get_settings()
+    args = _parse_args(argv)
+
+    # CLI flags override env vars / .env
+    overrides: dict[str, str | bool] = {}
+    if args.token is not None:
+        overrides["telegram_token"] = args.token
+    if args.acp_cmd is not None:
+        overrides["acp_server_cmd"] = args.acp_cmd
+    if args.session_mode is not None:
+        overrides["acp_session_mode"] = args.session_mode
+    if args.allowed_chats is not None:
+        overrides["allowed_chats"] = args.allowed_chats
+    if args.debug is not None:
+        overrides["debug_acp"] = args.debug
+
+    settings = Settings(**overrides)  # type: ignore[arg-type]
 
     logging.basicConfig(
         level=logging.DEBUG if settings.debug_acp else logging.INFO,

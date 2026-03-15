@@ -20,6 +20,7 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "pydantic-settings>=2.0",
     "agent-client-protocol>=0.8.1",
+    "opentelemetry-api>=1.20",
 ]
 
 [project.urls]
@@ -41,7 +42,7 @@ packages = ["src/telegram_acp"]
 include = ["src/telegram_acp", "LICENSE", "README.md"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.9"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "pytest-cov>=6.0", "ruff>=0.9", "mypy>=1.13"]
 
 [tool.ruff]
 target-version = "py311"
@@ -49,8 +50,52 @@ line-length = 100
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["ALL"]
+ignore = [
+    "D",       # pydocstyle — no mandatory docstrings
+    "ANN",     # flake8-annotations — no forced annotations everywhere
+    "ERA",     # eradicate — allow commented-out code
+    "FIX",     # allow fixme/todo comments
+    "TD",      # no todo format enforcement
+    "S101",    # assert in tests is fine
+    "TC",      # type-checking import blocks — not worth the churn
+    "BLE001",  # broad except Exception — intentional in error handlers
+    "TRY301",  # abstract raise into inner function — over-engineering
+    "EM",      # string literals in exceptions — not worth it
+    "TRY003",  # long exception messages — fine for us
+    "COM812",  # trailing comma — conflicts with formatter
+    "FBT",     # boolean positional args — fine for internal constructors
+    "PLW0603", # global statement — needed for deferred init pattern
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S",       # security checks not relevant in tests
+    "SLF001",  # tests need to access private members
+    "PLR2004", # magic values in assertions are fine
+    "PLR0913", # many args in test helpers are fine
+    "PLC0415", # imports inside test functions are fine
+    "ARG001",  # unused args in mock callbacks are fine
+    "PERF401", # async list comprehension not worth it in tests
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+mypy_path = "src"
+packages = ["telegram_acp"]
+plugins = ["pydantic.mypy"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["telegram_acp"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+fail_under = 40
