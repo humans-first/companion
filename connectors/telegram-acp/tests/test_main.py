@@ -433,7 +433,7 @@ class TestRespond:
         ctx = _make_ctx()
         main._last_seen_msg[100] = 5
 
-        async def fake_prompt(*_args):
+        async def fake_prompt(*_args, **_kwargs):
             yield "Hello back!"
 
         self.mock_acp.prompt = MagicMock(side_effect=fake_prompt)
@@ -450,7 +450,7 @@ class TestRespond:
         ctx = _make_ctx()
         main._last_seen_msg[100] = 10
 
-        async def fake_prompt(*_args):
+        async def fake_prompt(*_args, **_kwargs):
             yield "threaded reply"
 
         self.mock_acp.prompt = MagicMock(side_effect=fake_prompt)
@@ -466,7 +466,7 @@ class TestRespond:
         ctx = _make_ctx()
         main._last_seen_msg[100] = 5
 
-        async def fake_prompt(*_args):
+        async def fake_prompt(*_args, **_kwargs):
             yield "   "
 
         self.mock_acp.prompt = MagicMock(side_effect=fake_prompt)
@@ -482,7 +482,7 @@ class TestRespond:
         ctx = _make_ctx()
         main._last_seen_msg[100] = 5
 
-        async def fake_prompt(*_args):
+        async def fake_prompt(*_args, **_kwargs):
             yield "chunk1 "
             yield "chunk2 "
             yield "chunk3"
@@ -502,7 +502,7 @@ class TestRespond:
         # Generate a response longer than 4096 chars
         long_text = "x" * 5000
 
-        async def fake_prompt(*_args):
+        async def fake_prompt(*_args, **_kwargs):
             yield long_text
 
         self.mock_acp.prompt = MagicMock(side_effect=fake_prompt)
@@ -521,7 +521,7 @@ class TestRespond:
         ctx = _make_ctx()
         self.mock_acp.reset = AsyncMock()
 
-        async def failing_prompt(*_args):
+        async def failing_prompt(*_args, **_kwargs):
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
@@ -548,7 +548,7 @@ class TestRespond:
 
         captured_blocks = []
 
-        async def capture_prompt(_chat_id, blocks):
+        async def capture_prompt(_chat_id, blocks, **_kwargs):
             captured_blocks.extend(blocks)
             yield "ok"
 
@@ -580,7 +580,7 @@ class TestRespond:
 
         captured_blocks = []
 
-        async def capture_prompt(_chat_id, blocks):
+        async def capture_prompt(_chat_id, blocks, **_kwargs):
             captured_blocks.extend(blocks)
             yield "ok"
 
@@ -604,7 +604,7 @@ class TestRespond:
 
         captured_blocks = []
 
-        async def capture_prompt(_chat_id, blocks):
+        async def capture_prompt(_chat_id, blocks, **_kwargs):
             captured_blocks.extend(blocks)
             yield "ok"
 
@@ -628,7 +628,7 @@ class TestRespond:
 
         captured_blocks = []
 
-        async def capture_prompt(_chat_id, blocks):
+        async def capture_prompt(_chat_id, blocks, **_kwargs):
             captured_blocks.extend(blocks)
             yield "ok"
 
@@ -652,7 +652,7 @@ class TestRespond:
 
         captured_blocks = []
 
-        async def capture_prompt(_chat_id, blocks):
+        async def capture_prompt(_chat_id, blocks, **_kwargs):
             captured_blocks.extend(blocks)
             yield "ok"
 
@@ -662,6 +662,38 @@ class TestRespond:
 
         block_text = captured_blocks[0].text
         assert "[12345]: hello" in block_text
+
+    @pytest.mark.asyncio
+    async def test_passes_meta_with_principal_and_context(self):
+        update = _make_update(
+            chat_id=100,
+            chat_type=ChatType.SUPERGROUP,
+            chat_title="Dev Team",
+            message_id=5,
+            user_id=200,
+            user_full_name="Alice Smith",
+            user_username="alice",
+        )
+        ctx = _make_ctx()
+        main._last_seen_msg[100] = 5
+
+        captured_meta = {}
+
+        async def capture_prompt(_chat_id, _blocks, **kwargs):
+            captured_meta.update(kwargs.get("meta", {}))
+            yield "ok"
+
+        self.mock_acp.prompt = MagicMock(side_effect=capture_prompt)
+
+        await main._respond(update, ctx, "hello")
+
+        assert captured_meta["principal"]["platform"] == "telegram"
+        assert captured_meta["principal"]["user_id"] == 200
+        assert captured_meta["principal"]["display_name"] == "Alice Smith"
+        assert captured_meta["principal"]["username"] == "alice"
+        assert captured_meta["context"]["chat_id"] == 100
+        assert captured_meta["context"]["chat_type"] == "supergroup"
+        assert captured_meta["context"]["chat_title"] == "Dev Team"
 
 
 # ------------------------------------------------------------------ #

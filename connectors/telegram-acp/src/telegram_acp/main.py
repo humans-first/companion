@@ -158,9 +158,24 @@ async def _respond(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) ->
         reply_ctx = _build_reply_context(msg.reply_to_message, ctx.bot.id)
         prompt = f"{header}{reply_ctx}[{display_name}]: {text}"
 
+        # Build ACP _meta with principal and context for downstream auth
+        meta = {
+            "principal": {
+                "platform": "telegram",
+                "user_id": user.id,
+                "display_name": display_name,
+                "username": user.username,
+            },
+            "context": {
+                "chat_id": chat_id,
+                "chat_type": str(chat.type),
+                "chat_title": chat.title,
+            },
+        }
+
         try:
             full = ""
-            async for chunk in _acp.prompt(chat_id, [text_block(prompt)]):
+            async for chunk in _acp.prompt(chat_id, [text_block(prompt)], meta=meta):
                 full += chunk
 
             if not full.strip():

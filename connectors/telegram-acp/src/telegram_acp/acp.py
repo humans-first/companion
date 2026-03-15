@@ -226,7 +226,13 @@ class ACPManager:
             self._locks[chat_id] = asyncio.Lock()
         return self._locks[chat_id]
 
-    async def prompt(self, chat_id: int, blocks: list[ContentBlock]) -> AsyncIterator[str]:
+    async def prompt(
+        self,
+        chat_id: int,
+        blocks: list[ContentBlock],
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> AsyncIterator[str]:
         """Send a prompt and yield text chunks as they stream in.
 
         Creates a session for the chat on first use. Serializes prompts
@@ -250,7 +256,7 @@ class ACPManager:
                 async def _do_prompt() -> None:
                     try:
                         assert self._conn is not None
-                        await self._conn.prompt(session_id=sid, prompt=blocks)
+                        await self._conn.prompt(session_id=sid, prompt=blocks, **(meta or {}))
                     finally:
                         await q.put(None)
 
