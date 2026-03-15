@@ -190,13 +190,13 @@ async def _respond(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) ->
             is_latest = _last_seen_msg.get(chat_id) == msg.message_id
             span.set_attribute("telegram.threaded", not is_latest)
             if is_latest:
-                await ctx.bot.send_message(chat_id, parts[0])
+                await ctx.bot.send_message(chat_id, parts[0], parse_mode="MarkdownV2")
                 for part in parts[1:]:
-                    await ctx.bot.send_message(chat_id, part)
+                    await ctx.bot.send_message(chat_id, part, parse_mode="MarkdownV2")
             else:
-                await msg.reply_text(parts[0])
+                await msg.reply_text(parts[0], parse_mode="MarkdownV2")
                 for part in parts[1:]:
-                    await msg.reply_text(part)
+                    await msg.reply_text(part, parse_mode="MarkdownV2")
 
             responses_sent.add(1, attrs)
 
@@ -360,9 +360,7 @@ def main(argv: list[str] | None = None) -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CommandHandler("chatid", cmd_chatid))
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, _track_message), group=-1
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _track_message), group=-1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.run_polling(drop_pending_updates=True)

@@ -245,9 +245,7 @@ class TestACPManagerLifecycle:
         with patch("telegram_acp.acp.spawn_agent_process", fake_spawn):
             await mgr.start()
             await mgr._get_session(100)
-            conn.set_session_mode.assert_awaited_once_with(
-                mode_id="chat", session_id="sess-abc"
-            )
+            conn.set_session_mode.assert_awaited_once_with(mode_id="chat", session_id="sess-abc")
             await mgr.stop()
 
     @pytest.mark.asyncio

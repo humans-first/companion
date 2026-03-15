@@ -99,9 +99,7 @@ class _BotClient:
     ) -> None:
         return None
 
-    async def read_text_file(
-        self, _path: Any, _session_id: Any, **_kwargs: Any
-    ) -> dict[str, Any]:
+    async def read_text_file(self, _path: Any, _session_id: Any, **_kwargs: Any) -> dict[str, Any]:
         return {"content": ""}
 
     async def create_terminal(
@@ -114,9 +112,7 @@ class _BotClient:
     ) -> dict[str, Any]:
         return {"output": ""}
 
-    async def release_terminal(
-        self, _session_id: Any, _terminal_id: Any, **_kwargs: Any
-    ) -> None:
+    async def release_terminal(self, _session_id: Any, _terminal_id: Any, **_kwargs: Any) -> None:
         return None
 
     async def wait_for_terminal_exit(
@@ -124,9 +120,7 @@ class _BotClient:
     ) -> dict[str, Any]:
         return {"exitCode": 0}
 
-    async def kill_terminal(
-        self, _session_id: Any, _terminal_id: Any, **_kwargs: Any
-    ) -> None:
+    async def kill_terminal(self, _session_id: Any, _terminal_id: Any, **_kwargs: Any) -> None:
         return None
 
     async def ext_method(self, _method: Any, _params: Any) -> dict[str, Any]:
@@ -170,11 +164,13 @@ class ACPManager:
 
     async def _run(self) -> None:
         try:
-            async with spawn_agent_process(
-                self._client,  # type: ignore[arg-type]  # duck-typed ACP Client
-                self.cmd[0],
-                *self.cmd[1:],
-            ) as (conn, proc):
+            async with (
+                spawn_agent_process(
+                    self._client,  # type: ignore[arg-type]  # duck-typed ACP Client
+                    self.cmd[0],
+                    *self.cmd[1:],
+                ) as (conn, proc)
+            ):
                 self._conn = conn
                 self._proc = proc
                 await conn.initialize(protocol_version=1)

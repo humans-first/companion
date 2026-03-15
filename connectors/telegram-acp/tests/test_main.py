@@ -106,16 +106,12 @@ class TestBuildReplyContext:
     def test_reply_to_user_username_fallback(self):
         author = SimpleNamespace(id=200, full_name=None, username="bob42")
         reply = SimpleNamespace(text="hey", from_user=author)
-        assert main._build_reply_context(reply, bot_id=100) == (
-            '[Replying to bob42: "hey"]\n'
-        )
+        assert main._build_reply_context(reply, bot_id=100) == ('[Replying to bob42: "hey"]\n')
 
     def test_reply_to_user_id_fallback(self):
         author = SimpleNamespace(id=200, full_name=None, username=None)
         reply = SimpleNamespace(text="hey", from_user=author)
-        assert main._build_reply_context(reply, bot_id=100) == (
-            '[Replying to 200: "hey"]\n'
-        )
+        assert main._build_reply_context(reply, bot_id=100) == ('[Replying to 200: "hey"]\n')
 
     def test_reply_unknown_author(self):
         reply = SimpleNamespace(text="mystery", from_user=None)
@@ -186,9 +182,7 @@ class TestCmdStart:
         ctx = _make_ctx()
         main._allowed = set()
         await main.cmd_start(update, ctx)
-        update.message.reply_text.assert_awaited_once_with(
-            "Hey Alice. Send me a message."
-        )
+        update.message.reply_text.assert_awaited_once_with("Hey Alice. Send me a message.")
 
     @pytest.mark.asyncio
     async def test_blocked_by_allowlist(self):
@@ -244,9 +238,7 @@ class TestCmdChatid:
         update = _make_update(chat_id=42)
         ctx = _make_ctx()
         await main.cmd_chatid(update, ctx)
-        update.message.reply_text.assert_awaited_once_with(
-            "Chat ID: `42`", parse_mode="Markdown"
-        )
+        update.message.reply_text.assert_awaited_once_with("Chat ID: `42`", parse_mode="Markdown")
 
 
 class TestTrackMessage:
@@ -306,9 +298,7 @@ class TestHandleMessage:
 
     @pytest.mark.asyncio
     async def test_group_ignores_without_mention(self):
-        update = _make_update(
-            chat_type=ChatType.GROUP, text="random message", chat_title="Test"
-        )
+        update = _make_update(chat_type=ChatType.GROUP, text="random message", chat_title="Test")
         ctx = _make_ctx(bot_username="testbot")
         main._allowed = set()
         with patch.object(main, "_respond", new_callable=AsyncMock) as mock_respond:
@@ -361,9 +351,7 @@ class TestHandleMessage:
 
     @pytest.mark.asyncio
     async def test_group_mention_only_is_ignored(self):
-        update = _make_update(
-            chat_type=ChatType.GROUP, text="@testbot", chat_title="Test"
-        )
+        update = _make_update(chat_type=ChatType.GROUP, text="@testbot", chat_title="Test")
         ctx = _make_ctx(bot_username="testbot")
         main._allowed = set()
         with patch.object(main, "_respond", new_callable=AsyncMock) as mock_respond:
@@ -441,7 +429,7 @@ class TestRespond:
         await main._respond(update, ctx, "hi")
 
         ctx.bot.send_chat_action.assert_awaited_once()
-        ctx.bot.send_message.assert_awaited_once_with(100, "Hello back!")
+        ctx.bot.send_message.assert_awaited_once_with(100, "Hello back!", parse_mode="MarkdownV2")
         update.message.reply_text.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -457,7 +445,9 @@ class TestRespond:
 
         await main._respond(update, ctx, "hi")
 
-        update.message.reply_text.assert_awaited_once_with("threaded reply")
+        update.message.reply_text.assert_awaited_once_with(
+            "threaded reply", parse_mode="MarkdownV2"
+        )
         ctx.bot.send_message.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -491,7 +481,9 @@ class TestRespond:
 
         await main._respond(update, ctx, "hi")
 
-        ctx.bot.send_message.assert_awaited_once_with(100, "chunk1 chunk2 chunk3")
+        ctx.bot.send_message.assert_awaited_once_with(
+            100, "chunk1 chunk2 chunk3", parse_mode="MarkdownV2"
+        )
 
     @pytest.mark.asyncio
     async def test_long_response_split_into_parts(self):
@@ -748,13 +740,19 @@ class TestParseArgs:
         assert args.debug is None
 
     def test_all_flags(self):
-        args = main._parse_args([
-            "--token", "abc:123",
-            "--acp-cmd", "my-agent serve",
-            "--session-mode", "chat",
-            "--allowed-chats", "100,-200",
-            "--debug",
-        ])
+        args = main._parse_args(
+            [
+                "--token",
+                "abc:123",
+                "--acp-cmd",
+                "my-agent serve",
+                "--session-mode",
+                "chat",
+                "--allowed-chats",
+                "100,-200",
+                "--debug",
+            ]
+        )
         assert args.token == "abc:123"
         assert args.acp_cmd == "my-agent serve"
         assert args.session_mode == "chat"
