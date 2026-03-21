@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use agent_client_protocol::{self as acp};
+use serde_json::value::RawValue;
 use tracing::{debug, info};
 
 use crate::config::Strategy;
@@ -122,7 +125,36 @@ impl acp::Agent for GatewayAgent {
         &self,
         mut args: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
-        let (conn, backend_sid) = self.pool.backend_for_session(&args.session_id.0)?;
+        let external_sid = args.session_id.0.to_string();
+
+        let (conn, backend_sid) = match self.pool.backend_for_session(&external_sid) {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Check if evicted — reload transparently.
+                if let Some(evicted) = self.pool.take_evicted(&external_sid) {
+                    info!(external_sid = %external_sid, "transparently reloading evicted session via load_session");
+                    let slot_idx = self.pool.select_slot()?;
+
+                    if self.pool.strategy() == Strategy::Dedicated && !self.pool.is_slot_populated(slot_idx) {
+                        self.pool.spawn_dedicated_backend(slot_idx).await.map_err(|e| {
+                            acp::Error::internal_error().data(format!("failed to spawn backend: {e}"))
+                        })?;
+                    }
+
+                    let conn = self.pool.backend_conn(slot_idx)?;
+                    let resp = conn
+                        .load_session(acp::LoadSessionRequest::new(
+                            acp::SessionId::new(evicted.backend_sid.as_str()),
+                            evicted.cwd.clone(),
+                        ))
+                        .await?;
+                    self.pool.register_session(&external_sid, &evicted.backend_sid, slot_idx, evicted.cwd);
+                    return Ok(resp);
+                }
+                return Err(error::unknown_session(&external_sid));
+            }
+        };
+
         args.session_id = backend_sid;
         conn.load_session(args).await
     }
@@ -235,7 +267,98 @@ impl acp::Agent for GatewayAgent {
         Ok(acp::ListSessionsResponse::new(all_sessions))
     }
 
+    #[cfg(feature = "unstable_session_model")]
+    async fn set_session_model(
+        &self,
+        mut args: acp::SetSessionModelRequest,
+    ) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        let (conn, backend_sid) = self.pool.backend_for_session(&args.session_id.0)?;
+        args.session_id = backend_sid;
+        conn.set_session_model(args).await
+    }
+
+    #[cfg(feature = "unstable_session_fork")]
+    async fn fork_session(
+        &self,
+        mut args: acp::ForkSessionRequest,
+    ) -> Result<acp::ForkSessionResponse, acp::Error> {
+        let external_sid = args.session_id.0.to_string();
+        let cwd = args.cwd.clone();
+        let (conn, backend_sid) = self.pool.backend_for_session(&external_sid)?;
+        let (_, slot_index, _) = self.pool.resolve_session(&external_sid)
+            .ok_or_else(|| error::unknown_session(&external_sid))?;
+        args.session_id = backend_sid;
+        let mut response = conn.fork_session(args).await?;
+
+        // Register the forked session with a new external ID on the same slot.
+        let new_external_sid = AgentPool::new_external_sid();
+        let new_backend_sid = response.session_id.0.to_string();
+        self.pool.register_session(&new_external_sid, &new_backend_sid, slot_index, cwd);
+        response.session_id = acp::SessionId::new(new_external_sid);
+        Ok(response)
+    }
+
+    #[cfg(feature = "unstable_session_resume")]
+    async fn resume_session(
+        &self,
+        mut args: acp::ResumeSessionRequest,
+    ) -> Result<acp::ResumeSessionResponse, acp::Error> {
+        let external_sid = args.session_id.0.to_string();
+
+        let (conn, backend_sid) = match self.pool.backend_for_session(&external_sid) {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Check if evicted — reload transparently.
+                if let Some(evicted) = self.pool.take_evicted(&external_sid) {
+                    info!(external_sid = %external_sid, "transparently reloading evicted session via resume_session");
+                    let slot_idx = self.pool.select_slot()?;
+                    if self.pool.strategy() == Strategy::Dedicated && !self.pool.is_slot_populated(slot_idx) {
+                        self.pool.spawn_dedicated_backend(slot_idx).await.map_err(|e| {
+                            acp::Error::internal_error().data(format!("failed to spawn backend: {e}"))
+                        })?;
+                    }
+                    let conn = self.pool.backend_conn(slot_idx)?;
+                    let resp = conn
+                        .resume_session(acp::ResumeSessionRequest::new(
+                            acp::SessionId::new(evicted.backend_sid.as_str()),
+                            evicted.cwd.clone(),
+                        ))
+                        .await?;
+                    self.pool.register_session(&external_sid, &evicted.backend_sid, slot_idx, evicted.cwd);
+                    return Ok(resp);
+                }
+                return Err(error::unknown_session(&external_sid));
+            }
+        };
+
+        args.session_id = backend_sid;
+        conn.resume_session(args).await
+    }
+
+    #[cfg(feature = "unstable_session_close")]
+    async fn close_session(
+        &self,
+        mut args: acp::CloseSessionRequest,
+    ) -> Result<acp::CloseSessionResponse, acp::Error> {
+        let external_sid = args.session_id.0.to_string();
+        let (conn, backend_sid) = self.pool.backend_for_session(&external_sid)?;
+        args.session_id = backend_sid;
+        let response = conn.close_session(args).await?;
+        self.pool.remove_session(&external_sid);
+        Ok(response)
+    }
+
     async fn ext_method(&self, args: acp::ExtRequest) -> Result<acp::ExtResponse, acp::Error> {
+        // Handle gateway-specific extension methods.
+        if args.method.as_ref() == "gateway/status" {
+            let status = self.pool.pool_status();
+            let json = status.to_string();
+            let raw: Arc<RawValue> = RawValue::from_string(json)
+                .map_err(|_| acp::Error::internal_error())?
+                .into();
+            return Ok(acp::ExtResponse::new(raw));
+        }
+
         let slots = self.pool.alive_slots();
         let slot_idx = slots.first().ok_or_else(acp::Error::internal_error)?;
         self.pool.backend_conn(*slot_idx)?.ext_method(args).await

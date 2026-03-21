@@ -32,6 +32,7 @@ pub struct SessionEntry {
 pub struct EvictedSession {
     pub backend_sid: String,
     pub cwd: std::path::PathBuf,
+    pub evicted_at: Instant,
 }
 
 pub struct PoolConfig {
@@ -197,14 +198,53 @@ impl AgentPool {
             .unwrap_or_else(|| sid.clone())
     }
 
-    /// Map backend → external SessionId, or pass through if unknown.
+    /// Map backend → external SessionId, or pass through with a warning if unknown.
     pub fn to_external(&self, sid: &acp::SessionId) -> acp::SessionId {
         let inner = self.inner.borrow();
-        inner
-            .reverse
-            .get(sid.0.as_ref())
-            .map(|e| acp::SessionId::new(e.as_str()))
-            .unwrap_or_else(|| sid.clone())
+        match inner.reverse.get(sid.0.as_ref()) {
+            Some(external) => acp::SessionId::new(external.as_str()),
+            None => {
+                warn!(backend_sid = %sid.0, "unknown backend session ID in to_external, passing through");
+                sid.clone()
+            }
+        }
+    }
+
+    /// Remove a session from the pool (on explicit close).
+    /// For Dedicated mode, frees the slot when its last session is removed.
+    /// Used by `close_session` (unstable_session_close feature).
+    #[allow(dead_code)]
+    pub fn remove_session(&self, external_sid: &str) {
+        let mut child_to_kill = None;
+        {
+            let mut inner = self.inner.borrow_mut();
+            if let Some(entry) = inner.sessions.remove(external_sid) {
+                inner.reverse.remove(&entry.backend_sid);
+                inner.in_flight_prompts.remove(external_sid);
+                let slot_index = entry.slot_index;
+                if let Some(slot) = inner.slots.get_mut(slot_index).and_then(|s| s.as_mut()) {
+                    slot.session_count = slot.session_count.saturating_sub(1);
+                }
+                // In Dedicated mode, free the slot when its session is closed.
+                if inner.config.strategy == Strategy::Dedicated {
+                    let should_free = inner.slots.get(slot_index)
+                        .and_then(|s| s.as_ref())
+                        .map_or(false, |s| s.session_count == 0);
+                    if should_free {
+                        info!(slot_index, "freeing dedicated slot after session close");
+                        // Take the child out for graceful termination before dropping the slot.
+                        if let Some(slot) = inner.slots[slot_index].as_mut() {
+                            child_to_kill = slot.child.take();
+                        }
+                        inner.slots[slot_index] = None;
+                    }
+                }
+            }
+        }
+        // Gracefully terminate the child process outside the borrow.
+        if let Some(child) = child_to_kill {
+            graceful_kill(child);
+        }
     }
 
     /// Update last_activity timestamp for a session.
@@ -262,33 +302,52 @@ impl AgentPool {
     /// Evict sessions idle for longer than `timeout`.
     /// Returns the list of evicted external session IDs.
     pub fn evict_idle_sessions(&self, timeout: std::time::Duration) -> Vec<String> {
-        let mut inner = self.inner.borrow_mut();
-        let now = Instant::now();
+        let mut children_to_kill = Vec::new();
         let mut evicted_sids = Vec::new();
+        {
+            let mut inner = self.inner.borrow_mut();
+            let now = Instant::now();
 
-        let idle: Vec<(String, String, std::path::PathBuf, usize)> = inner
-            .sessions
-            .iter()
-            .filter(|(_, entry)| now.duration_since(entry.last_activity) >= timeout)
-            .map(|(ext, entry)| (ext.clone(), entry.backend_sid.clone(), entry.cwd.clone(), entry.slot_index))
-            .collect();
+            let idle: Vec<(String, String, std::path::PathBuf, usize)> = inner
+                .sessions
+                .iter()
+                .filter(|(_, entry)| now.duration_since(entry.last_activity) >= timeout)
+                .map(|(ext, entry)| (ext.clone(), entry.backend_sid.clone(), entry.cwd.clone(), entry.slot_index))
+                .collect();
 
-        for (ext_sid, backend_sid, cwd, slot_index) in idle {
-            info!(external_sid = %ext_sid, "evicting idle session");
-            inner.sessions.remove(&ext_sid);
-            inner.reverse.remove(&backend_sid);
-            inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid, cwd });
+            // Collect which dedicated slots to free so we handle each only once.
+            let mut dedicated_slots_to_free: Vec<usize> = Vec::new();
 
-            if inner.config.strategy == Strategy::Dedicated {
-                // Kill process and free the slot so it can be reused.
-                info!(slot_index, "freeing dedicated slot on eviction");
-                inner.slots[slot_index] = None;
-            } else {
-                if let Some(slot) = inner.slots.get_mut(slot_index).and_then(|s| s.as_mut()) {
+            for (ext_sid, backend_sid, cwd, slot_index) in idle {
+                info!(external_sid = %ext_sid, "evicting idle session");
+                inner.sessions.remove(&ext_sid);
+                inner.reverse.remove(&backend_sid);
+                inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid, cwd, evicted_at: now });
+
+                if inner.config.strategy == Strategy::Dedicated {
+                    if !dedicated_slots_to_free.contains(&slot_index) {
+                        dedicated_slots_to_free.push(slot_index);
+                    }
+                } else if let Some(slot) = inner.slots.get_mut(slot_index).and_then(|s| s.as_mut()) {
                     slot.session_count = slot.session_count.saturating_sub(1);
                 }
+                evicted_sids.push(ext_sid);
             }
-            evicted_sids.push(ext_sid);
+
+            // Free dedicated slots, extracting children for graceful kill.
+            for slot_index in dedicated_slots_to_free {
+                info!(slot_index, "freeing dedicated slot on eviction");
+                if let Some(slot) = inner.slots[slot_index].as_mut() {
+                    if let Some(child) = slot.child.take() {
+                        children_to_kill.push(child);
+                    }
+                }
+                inner.slots[slot_index] = None;
+            }
+        }
+        // Gracefully terminate child processes outside the borrow.
+        for child in children_to_kill {
+            graceful_kill(child);
         }
 
         evicted_sids
@@ -304,14 +363,18 @@ impl AgentPool {
         self.inner.borrow().evicted.contains_key(external_sid)
     }
 
-    /// Remove stale evicted entries older than `max_age`.
-    /// Called periodically alongside idle eviction to prevent unbounded growth.
+    /// Remove the oldest evicted entries when the map exceeds `max_entries`.
+    /// Called periodically to prevent unbounded growth.
     pub fn purge_stale_evicted(&self, max_entries: usize) {
         let mut inner = self.inner.borrow_mut();
         if inner.evicted.len() > max_entries {
             let excess = inner.evicted.len() - max_entries;
-            let keys_to_remove: Vec<String> = inner.evicted.keys().take(excess).cloned().collect();
-            for key in keys_to_remove {
+            // Sort by eviction time, remove oldest.
+            let mut entries: Vec<(String, Instant)> = inner.evicted.iter()
+                .map(|(k, v)| (k.clone(), v.evicted_at))
+                .collect();
+            entries.sort_by_key(|(_, t)| *t);
+            for (key, _) in entries.into_iter().take(excess) {
                 debug!(external_sid = %key, "purging stale evicted session");
                 inner.evicted.remove(&key);
             }
@@ -365,7 +428,7 @@ impl AgentPool {
         for (ext_sid, backend_sid, cwd) in &affected {
             inner.sessions.remove(ext_sid);
             inner.reverse.remove(backend_sid);
-            inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid: backend_sid.clone(), cwd: cwd.clone() });
+            inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid: backend_sid.clone(), cwd: cwd.clone(), evicted_at: Instant::now() });
             inner.in_flight_prompts.remove(ext_sid);
         }
 
@@ -406,6 +469,10 @@ impl AgentPool {
 
         // Send SIGTERM to process groups (negative PID = entire group).
         for &(i, pid) in &pids {
+            if pid > i32::MAX as u32 {
+                warn!(slot_index = i, pid, "PID exceeds i32::MAX, skipping SIGTERM");
+                continue;
+            }
             let pgid = -(pid as i32);
             debug!(slot_index = i, pid, "sending SIGTERM to backend process group");
             unsafe {
@@ -458,9 +525,22 @@ impl AgentPool {
     /// Used by `initialize` to spawn the first Dedicated backend for real init.
     pub async fn spawn_backend_process(&self, slot_index: usize) -> Result<(), String> {
         let agent_cmd = self.inner.borrow().config.agent_cmd.clone();
-        crate::spawn_backend(self, &agent_cmd, slot_index)
+        crate::spawn::spawn_backend(self, &agent_cmd, slot_index)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// Replay the stored InitializeRequest to a backend at `slot_index`.
+    /// No-op if no init request has been stored yet.
+    pub async fn replay_init(&self, slot_index: usize) -> Result<(), String> {
+        let init_req = self.inner.borrow().init_request.clone();
+        if let Some(req) = init_req {
+            let conn = self.backend_conn(slot_index)
+                .map_err(|e| format!("backend_conn for init replay: {e}"))?;
+            conn.initialize(req).await
+                .map_err(|e| format!("initialize backend: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Spawn a dedicated backend process into the given slot and initialize it.
@@ -470,23 +550,61 @@ impl AgentPool {
     /// replayed to the new backend before it receives any other calls.
     pub async fn spawn_dedicated_backend(&self, slot_index: usize) -> Result<(), String> {
         self.spawn_backend_process(slot_index).await?;
-
-        // Replay stored init request to the new backend.
-        let init_req = self.inner.borrow().init_request.clone();
-        if let Some(req) = init_req {
-            let conn = self.backend_conn(slot_index)
-                .map_err(|e| format!("backend_conn after spawn: {e}"))?;
-            conn.initialize(req).await
-                .map_err(|e| format!("initialize new backend: {e}"))?;
-        }
-
-        Ok(())
+        self.replay_init(slot_index).await
     }
 
     /// Check if a slot has a backend (as opposed to being empty/None).
     pub fn is_slot_populated(&self, index: usize) -> bool {
         let inner = self.inner.borrow();
         inner.slots.get(index).is_some_and(|s| s.is_some())
+    }
+
+    /// Return pool health/status as a JSON value.
+    pub fn pool_status(&self) -> serde_json::Value {
+        let inner = self.inner.borrow();
+        let mut slot_statuses = Vec::new();
+        let mut alive = 0usize;
+        let mut dead = 0usize;
+        let mut empty = 0usize;
+        for (i, slot) in inner.slots.iter().enumerate() {
+            match slot {
+                Some(s) if s.alive => {
+                    alive += 1;
+                    slot_statuses.push(serde_json::json!({
+                        "index": i,
+                        "state": "alive",
+                        "session_count": s.session_count,
+                    }));
+                }
+                Some(s) => {
+                    dead += 1;
+                    slot_statuses.push(serde_json::json!({
+                        "index": i,
+                        "state": "dead",
+                        "session_count": s.session_count,
+                    }));
+                }
+                None => {
+                    empty += 1;
+                    slot_statuses.push(serde_json::json!({
+                        "index": i,
+                        "state": "empty",
+                        "session_count": 0,
+                    }));
+                }
+            }
+        }
+        serde_json::json!({
+            "strategy": format!("{:?}", inner.config.strategy),
+            "pool_size": inner.config.pool_size,
+            "alive_slots": alive,
+            "dead_slots": dead,
+            "empty_slots": empty,
+            "active_sessions": inner.sessions.len(),
+            "evicted_sessions": inner.evicted.len(),
+            "in_flight_prompts": inner.in_flight_prompts.len(),
+            "slots": slot_statuses,
+        })
     }
 
     pub fn strategy(&self) -> Strategy {
@@ -520,6 +638,46 @@ impl AgentPool {
     pub fn is_prompt_in_flight(&self, external_sid: &str) -> bool {
         self.inner.borrow().in_flight_prompts.contains(external_sid)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Graceful process termination
+// ---------------------------------------------------------------------------
+
+/// Gracefully terminate a child process: SIGTERM → 500ms wait → SIGKILL.
+///
+/// Spawns a background task so callers don't need to be async.
+fn graceful_kill(mut child: Child) {
+    // Send SIGTERM to the process group.
+    if let Some(pid) = child.id() {
+        if pid <= i32::MAX as u32 {
+            let pgid = -(pid as i32);
+            debug!(pid, "sending SIGTERM to dedicated backend process group");
+            unsafe {
+                libc::kill(pgid as libc::pid_t, libc::SIGTERM);
+            }
+        } else {
+            warn!(pid, "PID exceeds i32::MAX, falling back to kill_on_drop");
+            return; // Drop child, triggering kill_on_drop.
+        }
+    } else {
+        // Process already exited.
+        return;
+    }
+
+    tokio::task::spawn_local(async move {
+        // Wait up to 500ms for graceful exit.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                debug!("dedicated backend exited gracefully after SIGTERM");
+            }
+            _ => {
+                debug!("dedicated backend did not exit, sending SIGKILL");
+                let _ = child.kill().await;
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +963,65 @@ mod tests {
         pool.handle_backend_death(0);
 
         assert!(!pool.is_prompt_in_flight("ext-1"));
+    }
+
+    // -- Session removal --
+
+    #[test]
+    fn test_remove_session_lc() {
+        let pool = make_pool(Strategy::LeastConnections, 1);
+        pool.insert_slot(0, make_mock_slot(true));
+        pool.register_session("ext-1", "back-1", 0, "/test".into());
+        pool.register_session("ext-2", "back-2", 0, "/test".into());
+        assert_eq!(pool.session_count(), 2);
+
+        pool.remove_session("ext-1");
+        assert_eq!(pool.session_count(), 1);
+        assert!(pool.resolve_session("ext-1").is_none());
+        assert!(pool.resolve_session("ext-2").is_some());
+        // Slot should still be populated (LC doesn't free slots).
+        assert!(pool.is_slot_populated(0));
+    }
+
+    #[test]
+    fn test_remove_session_dedicated_frees_slot() {
+        let pool = make_pool(Strategy::Dedicated, 2);
+        pool.insert_slot(0, make_mock_slot(true));
+        pool.register_session("ext-1", "back-1", 0, "/test".into());
+
+        pool.remove_session("ext-1");
+        assert_eq!(pool.session_count(), 0);
+        // Dedicated mode should free the slot.
+        assert!(!pool.is_slot_populated(0));
+    }
+
+    #[test]
+    fn test_remove_session_clears_prompt_guard() {
+        let pool = make_pool(Strategy::LeastConnections, 1);
+        pool.insert_slot(0, make_mock_slot(true));
+        pool.register_session("ext-1", "back-1", 0, "/test".into());
+        pool.begin_prompt("ext-1").unwrap();
+
+        pool.remove_session("ext-1");
+        assert!(!pool.is_prompt_in_flight("ext-1"));
+    }
+
+    // -- Pool status --
+
+    #[test]
+    fn test_pool_status() {
+        let pool = make_pool(Strategy::LeastConnections, 3);
+        pool.insert_slot(0, make_mock_slot(true));
+        pool.insert_slot(1, make_mock_slot(false)); // dead
+        // slot 2 is empty (None)
+        pool.register_session("ext-1", "back-1", 0, "/test".into());
+
+        let status = pool.pool_status();
+        assert_eq!(status["alive_slots"], 1);
+        assert_eq!(status["dead_slots"], 1);
+        assert_eq!(status["empty_slots"], 1);
+        assert_eq!(status["active_sessions"], 1);
+        assert_eq!(status["pool_size"], 3);
     }
 
     // -- Session count tracking --

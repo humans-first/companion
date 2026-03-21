@@ -10,7 +10,7 @@ name = "acp-gateway"
 path = "src/main.rs"
 
 [dependencies]
-agent-client-protocol = "0.10"
+agent-client-protocol = { version = "0.10", features = [] }
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 shell-words = "1"
@@ -22,14 +22,25 @@ uuid = { version = "1", features = ["v7"] }
 cedar-policy = "4"
 futures = "0.3"
 libc = "0.2"
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 
 [dev-dependencies]
 piper = "0.2"
+tempfile = "3"
 tokio-test = "0.4"
 
 [features]
 default = []
+unstable = [
+    "unstable_session_close",
+    "unstable_session_fork",
+    "unstable_session_model",
+    "unstable_session_resume",
+]
+unstable_session_close = ["agent-client-protocol/unstable_session_close"]
+unstable_session_fork = ["agent-client-protocol/unstable_session_fork"]
+unstable_session_model = ["agent-client-protocol/unstable_session_model"]
+unstable_session_resume = ["agent-client-protocol/unstable_session_resume"]
 
 # Needed for tokio::time::pause/advance in tests. The main dep already has "full".
 # We add test-util via a feature gate on the dev-dependency.

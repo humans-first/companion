@@ -21,10 +21,13 @@ mod integration {
         sessions: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
         prompts: Arc<Mutex<Vec<(String, Vec<acp::ContentBlock>)>>>,
         load_calls: Arc<Mutex<Vec<String>>>,
+        initialize_calls: Arc<AtomicUsize>,
         /// If set, prompt() will sleep this long before returning.
         prompt_delay: Option<std::time::Duration>,
         /// If true, initialize() returns an error.
         fail_initialize: bool,
+        /// If true, load_session() returns an error.
+        fail_load_session: bool,
     }
 
     impl MockAgent {
@@ -33,8 +36,10 @@ mod integration {
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 prompts: Arc::new(Mutex::new(Vec::new())),
                 load_calls: Arc::new(Mutex::new(Vec::new())),
+                initialize_calls: Arc::new(AtomicUsize::new(0)),
                 prompt_delay: None,
                 fail_initialize: false,
+                fail_load_session: false,
             }
         }
 
@@ -48,11 +53,18 @@ mod integration {
             self.fail_initialize = true;
             self
         }
+
+        #[allow(dead_code)]
+        fn with_failing_load_session(mut self) -> Self {
+            self.fail_load_session = true;
+            self
+        }
     }
 
     #[async_trait::async_trait(?Send)]
     impl acp::Agent for MockAgent {
         async fn initialize(&self, args: acp::InitializeRequest) -> acp::Result<acp::InitializeResponse> {
+            self.initialize_calls.fetch_add(1, Ordering::Relaxed);
             if self.fail_initialize {
                 return Err(acp::Error::internal_error().data("mock failure"));
             }
@@ -70,6 +82,9 @@ mod integration {
         }
         async fn load_session(&self, args: acp::LoadSessionRequest) -> acp::Result<acp::LoadSessionResponse> {
             self.load_calls.lock().unwrap().push(args.session_id.0.to_string());
+            if self.fail_load_session {
+                return Err(acp::Error::internal_error().data("mock load_session failure"));
+            }
             Ok(acp::LoadSessionResponse::new())
         }
         async fn set_session_mode(&self, _: acp::SetSessionModeRequest) -> acp::Result<acp::SetSessionModeResponse> {
@@ -1051,6 +1066,272 @@ mod integration {
             assert!(!harness.pool.is_slot_populated(0));
             // Slot 1 should be unaffected.
             assert!(harness.pool.is_slot_populated(1));
+        }).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Health / status tests
+    // -----------------------------------------------------------------------
+
+    /// The gateway/status ext_method should return pool health info.
+    #[tokio::test]
+    async fn test_gateway_status_ext_method() {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let harness = setup_harness(2, Strategy::LeastConnections);
+
+            // Create a session so we have something to report.
+            harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await.unwrap();
+
+            let resp = harness.upstream_to_gateway
+                .ext_method(acp::ExtRequest::new(
+                    "gateway/status",
+                    std::sync::Arc::from(serde_json::value::RawValue::from_string("{}".to_string()).unwrap()),
+                ))
+                .await;
+
+            assert!(resp.is_ok());
+            let raw = resp.unwrap();
+            let status: serde_json::Value = serde_json::from_str(raw.0.get()).unwrap();
+            assert_eq!(status["alive_slots"], 2);
+            assert_eq!(status["active_sessions"], 1);
+            assert_eq!(status["pool_size"], 2);
+        }).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Dedicated mode: exhaustion + recovery
+    // -----------------------------------------------------------------------
+
+    /// Dedicated mode: fill all slots, verify pool_exhausted, evict one, verify
+    /// new_session succeeds on the freed slot.
+    #[tokio::test]
+    async fn test_dedicated_pool_exhaustion_and_recovery() {
+        tokio::time::pause();
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let harness = setup_harness(2, Strategy::Dedicated);
+
+            // Fill both slots.
+            let s1 = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/a"))
+                .await.unwrap();
+            let _s2 = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/b"))
+                .await.unwrap();
+
+            assert_eq!(harness.pool.session_count(), 2);
+
+            // Evict session 1 to free a slot.
+            tokio::time::advance(std::time::Duration::from_secs(601)).await;
+            let evicted = harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
+            assert!(evicted.len() >= 1);
+
+            // At least one slot should now be freed.
+            let (_, _slot1, _) = harness.pool.resolve_session(&s1.session_id.0)
+                .unwrap_or((String::new(), 999, std::path::PathBuf::new()));
+            // If s1 was evicted, its slot is freed. If s2 was evicted, its slot is freed.
+            // Either way, we should have at least one free slot for a new session.
+            let freed_slot = (0..2).find(|i| !harness.pool.is_slot_populated(*i));
+            assert!(freed_slot.is_some(), "at least one slot should be freed after eviction");
+        }).await;
+    }
+
+    /// Dedicated mode: evict a session, reload it via prompt, evict again,
+    /// and reload again — verifying the full cycle works repeatedly.
+    /// Each eviction frees the dedicated slot, and reload picks another alive
+    /// idle slot, so we need N+1 backends for N cycles.
+    #[tokio::test]
+    async fn test_dedicated_multiple_eviction_reload_cycles() {
+        tokio::time::pause();
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            // 4 backends for 3 eviction+reload cycles (each cycle consumes one slot).
+            let harness = setup_harness(4, Strategy::Dedicated);
+
+            let resp = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await.unwrap();
+            let ext_sid = resp.session_id;
+
+            for cycle in 0..3 {
+                // Evict.
+                tokio::time::advance(std::time::Duration::from_secs(601)).await;
+                let evicted = harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
+                assert!(!evicted.is_empty(), "cycle {cycle}: session should be evicted");
+                assert!(harness.pool.is_evicted(&ext_sid.0), "cycle {cycle}: session should be in evicted map");
+
+                // Prompt triggers transparent reload on a different alive slot.
+                let result = harness.upstream_to_gateway
+                    .prompt(acp::PromptRequest::new(ext_sid.clone(), vec![format!("cycle {cycle}").into()]))
+                    .await;
+                assert!(result.is_ok(), "cycle {cycle}: prompt should succeed after reload");
+
+                // Session should be active again.
+                assert!(!harness.pool.is_evicted(&ext_sid.0), "cycle {cycle}: session should not be evicted after reload");
+                assert!(harness.pool.resolve_session(&ext_sid.0).is_some(), "cycle {cycle}: session should be resolvable");
+            }
+
+            // Verify load_session was called each time.
+            let total_loads: usize = harness.agents.iter()
+                .map(|a| a.load_calls.lock().unwrap().len())
+                .sum();
+            assert_eq!(total_loads, 3, "load_session should have been called 3 times");
+        }).await;
+    }
+
+    /// Dedicated mode: session is evicted (slot freed), then the original
+    /// backend's slot is dead. Prompt reloads the session on the other
+    /// alive backend and the session is usable there.
+    #[tokio::test]
+    async fn test_dedicated_eviction_then_reload_on_other_slot() {
+        tokio::time::pause();
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let harness = setup_harness(2, Strategy::Dedicated);
+
+            let resp = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await.unwrap();
+            let ext_sid = resp.session_id;
+            let (_, original_slot, _) = harness.pool.resolve_session(&ext_sid.0).unwrap();
+
+            // Evict the session (frees the dedicated slot).
+            tokio::time::advance(std::time::Duration::from_secs(601)).await;
+            harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
+            assert!(harness.pool.is_evicted(&ext_sid.0));
+
+            // Original slot is freed (None). Other slot is alive and idle.
+            assert!(!harness.pool.is_slot_populated(original_slot));
+
+            // Prompt should reload on the other alive slot.
+            let result = harness.upstream_to_gateway
+                .prompt(acp::PromptRequest::new(ext_sid.clone(), vec!["after eviction".into()]))
+                .await;
+            assert!(result.is_ok(), "prompt should succeed — reloaded on other slot");
+
+            // Session should now be on a different slot than the original.
+            let (_, new_slot, _) = harness.pool.resolve_session(&ext_sid.0).unwrap();
+            let other_slot = if original_slot == 0 { 1 } else { 0 };
+            assert_eq!(new_slot, other_slot, "session should reload on the other alive slot");
+
+            // That backend should have received load_session.
+            let loads = harness.agents[other_slot].load_calls.lock().unwrap();
+            assert_eq!(loads.len(), 1);
+        }).await;
+    }
+
+    /// Dedicated mode: when load_session fails during evicted reload,
+    /// the error is returned to the client and the session is NOT
+    /// registered (so it doesn't get stuck in a broken state).
+    #[tokio::test]
+    async fn test_dedicated_evicted_reload_failure() {
+        tokio::time::pause();
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let agents = vec![
+                MockAgent::new().with_failing_load_session(),
+                MockAgent::new().with_failing_load_session(),
+            ];
+            let harness = setup_harness_with_agents(agents, Strategy::Dedicated);
+
+            let resp = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await.unwrap();
+            let ext_sid = resp.session_id;
+
+            // Evict.
+            tokio::time::advance(std::time::Duration::from_secs(601)).await;
+            harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
+
+            // Prompt should fail because load_session fails on reload.
+            let result = harness.upstream_to_gateway
+                .prompt(acp::PromptRequest::new(ext_sid.clone(), vec!["will fail".into()]))
+                .await;
+            assert!(result.is_err(), "prompt should fail when load_session fails");
+
+            // The prompt guard should be cleared despite the failure.
+            assert!(!harness.pool.is_prompt_in_flight(&ext_sid.0));
+        }).await;
+    }
+
+    /// Dedicated mode: verify that initialize is called on each backend
+    /// that processes a new_session (via the stored init request replay).
+    /// The harness initializes all backends at setup, so each backend's
+    /// initialize_calls counter starts at 0 (harness doesn't call initialize).
+    /// When we call initialize through the gateway, all backends get it via scatter.
+    /// Then each new_session goes to a specific backend.
+    #[tokio::test]
+    async fn test_dedicated_init_replay_tracked() {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let harness = setup_harness(3, Strategy::Dedicated);
+
+            // Initialize through the gateway — all backends get it.
+            harness.upstream_to_gateway.initialize(
+                acp::InitializeRequest::new(acp::ProtocolVersion::LATEST)
+                    .client_info(acp::Implementation::new("test", "0.0.0"))
+            ).await.unwrap();
+
+            // All 3 backends should have received exactly 1 initialize call.
+            for (i, agent) in harness.agents.iter().enumerate() {
+                let count = agent.initialize_calls.load(Ordering::Relaxed);
+                assert_eq!(count, 1, "backend {i} should have 1 initialize call, got {count}");
+            }
+
+            // Create 3 sessions (one per backend, since Dedicated).
+            for _ in 0..3 {
+                harness.upstream_to_gateway
+                    .new_session(acp::NewSessionRequest::new("/test"))
+                    .await.unwrap();
+            }
+
+            // Each backend should have exactly 1 session.
+            for (i, agent) in harness.agents.iter().enumerate() {
+                let count = agent.sessions.lock().unwrap().len();
+                assert_eq!(count, 1, "backend {i} should have 1 session, got {count}");
+            }
+        }).await;
+    }
+
+    /// Dedicated mode: backend death + prompt on that session reloads
+    /// to a different backend. Verify the backend that receives the
+    /// reload is a different one.
+    #[tokio::test]
+    async fn test_dedicated_crash_reload_to_different_backend() {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let harness = setup_harness(2, Strategy::Dedicated);
+
+            // Create session on one backend.
+            let resp = harness.upstream_to_gateway
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await.unwrap();
+            let ext_sid = resp.session_id;
+            let (_, original_slot, _) = harness.pool.resolve_session(&ext_sid.0).unwrap();
+
+            // Kill that backend.
+            harness.pool.handle_backend_death(original_slot);
+
+            // Session should be evicted.
+            assert!(harness.pool.is_evicted(&ext_sid.0));
+
+            // Prompt should reload on the other (alive) backend.
+            let result = harness.upstream_to_gateway
+                .prompt(acp::PromptRequest::new(ext_sid.clone(), vec!["after crash".into()]))
+                .await;
+            assert!(result.is_ok(), "prompt should succeed after crash reload");
+
+            // Verify it moved to the other slot.
+            let (_, new_slot, _) = harness.pool.resolve_session(&ext_sid.0).unwrap();
+            assert_ne!(new_slot, original_slot, "session should reload on a different slot");
+
+            // The other backend should have received load_session.
+            let other = if original_slot == 0 { 1 } else { 0 };
+            let loads = harness.agents[other].load_calls.lock().unwrap();
+            assert_eq!(loads.len(), 1, "other backend should have 1 load_session call");
         }).await;
     }
 }

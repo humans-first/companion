@@ -263,9 +263,16 @@ mod tests {
         assert!(engine.authorize(&meta).is_err());
     }
 
+    // Use thread_local to hold TempDir so it lives as long as the test.
+    // TempDir is deleted on drop, so we need it to outlive the test function body.
+    thread_local! {
+        static TEMP_DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> = std::cell::RefCell::new(Vec::new());
+    }
+
     fn tempdir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("cedar-test-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        TEMP_DIRS.with(|dirs| dirs.borrow_mut().push(dir));
+        path
     }
 }
