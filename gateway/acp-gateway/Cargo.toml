@@ -1,0 +1,38 @@
+[package]
+name = "acp-gateway"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "ACP gateway proxy with session ID mapping and agent process management"
+
+[[bin]]
+name = "acp-gateway"
+path = "src/main.rs"
+
+[dependencies]
+agent-client-protocol = "0.10"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+shell-words = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v7"] }
+cedar-policy = "4"
+futures = "0.3"
+libc = "0.2"
+serde_json = "1"
+
+[dev-dependencies]
+piper = "0.2"
+tokio-test = "0.4"
+
+[features]
+default = []
+
+# Needed for tokio::time::pause/advance in tests. The main dep already has "full".
+# We add test-util via a feature gate on the dev-dependency.
+[dev-dependencies.tokio]
+version = "1"
+features = ["full", "test-util"]

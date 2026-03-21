@@ -1,0 +1,6 @@
+entity User;
+entity Chat;
+action "PromptRequest" appliesTo {
+    principal: User,
+    resource: Chat,
+};
