@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "acp-http-transport",
+    "gateway/acp-gateway",
+    "harness",
+]
+resolver = "2"

@@ -21,6 +21,7 @@ node_modules/
 
 # Rust
 target/
+coverage/
 
 # IDE
 .idea/

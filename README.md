@@ -90,6 +90,26 @@ telegram-acp --agent-cmd "acp-gateway --agent-cmd 'kiro-cli acp -a' --strategy d
 - **Simple stack**: Containerized, cloud-portable, minimal managed services. No high-level AI service dependencies.
 - **Open components**: Connectors and infrastructure are standalone open-source packages, not Companion-specific.
 
+## Coverage
+
+Local coverage is wired at the repo root:
+
+```sh
+./scripts/coverage.sh
+```
+
+Useful variants:
+
+```sh
+./scripts/coverage.sh --rust-only
+./scripts/coverage.sh --python-only
+```
+
+This writes reports under [`coverage/`](/Users/igaray/projects/companion/repo/companion/coverage) when the needed local tools are installed:
+- Rust workspace coverage uses `cargo-llvm-cov`
+- Harness sandbox Python coverage uses `python -m trace`
+- Telegram connector coverage uses `uv` + `pytest-cov`
+
 ## License
 
 Apache-2.0

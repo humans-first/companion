@@ -4,13 +4,15 @@ mod integration {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use agent_client_protocol::{self as acp, Agent as _};
+    use agent_client_protocol::{self as acp, Agent as _, Client as _};
 
     static GLOBAL_SESSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
+    type PromptRecord = (String, Vec<acp::ContentBlock>);
 
     use crate::config::Strategy;
     use crate::gateway::{GatewayAgent, GatewayClient};
     use crate::pool::{AgentPool, BackendSlot, PoolConfig};
+    use crate::service::GatewayService;
 
     // -----------------------------------------------------------------------
     // Mock Agent — acts as a backend agent process
@@ -19,7 +21,7 @@ mod integration {
     #[derive(Clone)]
     struct MockAgent {
         sessions: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
-        prompts: Arc<Mutex<Vec<(String, Vec<acp::ContentBlock>)>>>,
+        prompts: Arc<Mutex<Vec<PromptRecord>>>,
         load_calls: Arc<Mutex<Vec<String>>>,
         initialize_calls: Arc<AtomicUsize>,
         /// If set, prompt() will sleep this long before returning.
@@ -125,19 +127,22 @@ mod integration {
     #[derive(Clone)]
     struct MockUpstreamClient {
         notifications: Arc<Mutex<Vec<acp::SessionNotification>>>,
+        permission_requests: Arc<Mutex<Vec<acp::RequestPermissionRequest>>>,
     }
 
     impl MockUpstreamClient {
         fn new() -> Self {
             Self {
                 notifications: Arc::new(Mutex::new(Vec::new())),
+                permission_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
 
     #[async_trait::async_trait(?Send)]
     impl acp::Client for MockUpstreamClient {
-        async fn request_permission(&self, _: acp::RequestPermissionRequest) -> acp::Result<acp::RequestPermissionResponse> {
+        async fn request_permission(&self, args: acp::RequestPermissionRequest) -> acp::Result<acp::RequestPermissionResponse> {
+            self.permission_requests.lock().unwrap().push(args);
             Ok(acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled))
         }
         async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
@@ -180,9 +185,21 @@ mod integration {
     struct TestHarness {
         /// ClientSideConnection to the gateway (as if we're the upstream client calling the gateway)
         upstream_to_gateway: acp::ClientSideConnection,
+        _upstream_client: MockUpstreamClient,
+        _secondary_upstreams: Vec<acp::ClientSideConnection>,
+        _secondary_clients: Vec<MockUpstreamClient>,
         /// The agents behind each backend slot
         agents: Vec<MockAgent>,
         pool: AgentPool,
+        _service: GatewayService,
+    }
+
+    struct MultiFrontendHarness {
+        frontends: Vec<acp::ClientSideConnection>,
+        frontend_clients: Vec<MockUpstreamClient>,
+        agents: Vec<MockAgent>,
+        pool: AgentPool,
+        service: GatewayService,
     }
 
     /// Create a test harness with `num_backends` default mock backend processes.
@@ -193,12 +210,30 @@ mod integration {
 
     /// Create a test harness with pre-configured mock agents.
     fn setup_harness_with_agents(agents: Vec<MockAgent>, strategy: Strategy) -> TestHarness {
+        let mut harness = setup_multi_frontend_harness_with_agents(agents, strategy, 1);
+        TestHarness {
+            upstream_to_gateway: harness.frontends.remove(0),
+            _upstream_client: harness.frontend_clients.remove(0),
+            _secondary_upstreams: harness.frontends,
+            _secondary_clients: harness.frontend_clients,
+            agents: harness.agents,
+            pool: harness.pool,
+            _service: harness.service,
+        }
+    }
+
+    fn setup_multi_frontend_harness_with_agents(
+        agents: Vec<MockAgent>,
+        strategy: Strategy,
+        frontend_count: usize,
+    ) -> MultiFrontendHarness {
         let num_backends = agents.len();
         let pool = AgentPool::new(PoolConfig {
             strategy,
             pool_size: num_backends,
             agent_cmd: "mock".to_string(),
         });
+        let service = GatewayService::new(pool.clone(), None);
 
         let mut agent_refs = Vec::new();
 
@@ -208,7 +243,7 @@ mod integration {
             let (client_to_agent_rx, client_to_agent_tx) = piper::pipe(1024);
             let (agent_to_client_rx, agent_to_client_tx) = piper::pipe(1024);
 
-            let gateway_client = GatewayClient::new(pool.clone());
+            let gateway_client = GatewayClient::new(service.clone());
             let (backend_conn, backend_io) = acp::ClientSideConnection::new(
                 gateway_client,
                 client_to_agent_tx,
@@ -234,35 +269,44 @@ mod integration {
             tokio::task::spawn_local(agent_io);
         }
 
-        // Wire up upstream.
-        let upstream_client = MockUpstreamClient::new();
+        let mut frontends = Vec::new();
+        let mut frontend_clients = Vec::new();
 
-        let (upstream_to_gw_rx, upstream_to_gw_tx) = piper::pipe(1024);
-        let (gw_to_upstream_rx, gw_to_upstream_tx) = piper::pipe(1024);
+        for _ in 0..frontend_count {
+            let upstream_client = MockUpstreamClient::new();
+            let (upstream_to_gw_rx, upstream_to_gw_tx) = piper::pipe(1024);
+            let (gw_to_upstream_rx, gw_to_upstream_tx) = piper::pipe(1024);
 
-        let gateway_agent = GatewayAgent::new(pool.clone(), None);
-        let (upstream_conn, upstream_io) = acp::AgentSideConnection::new(
-            gateway_agent,
-            gw_to_upstream_tx,
-            upstream_to_gw_rx,
-            |fut| { tokio::task::spawn_local(fut); },
-        );
-        pool.set_upstream(upstream_conn);
+            let frontend_id = service.next_frontend_id();
+            let gateway_agent = GatewayAgent::new(service.clone(), frontend_id.clone());
+            let (upstream_conn, upstream_io) = acp::AgentSideConnection::new(
+                gateway_agent,
+                gw_to_upstream_tx,
+                upstream_to_gw_rx,
+                |fut| { tokio::task::spawn_local(fut); },
+            );
+            service.register_frontend(frontend_id, upstream_conn);
 
-        let (client_conn, client_io) = acp::ClientSideConnection::new(
-            upstream_client,
-            upstream_to_gw_tx,
-            gw_to_upstream_rx,
-            |fut| { tokio::task::spawn_local(fut); },
-        );
+            let (client_conn, client_io) = acp::ClientSideConnection::new(
+                upstream_client.clone(),
+                upstream_to_gw_tx,
+                gw_to_upstream_rx,
+                |fut| { tokio::task::spawn_local(fut); },
+            );
 
-        tokio::task::spawn_local(upstream_io);
-        tokio::task::spawn_local(client_io);
+            tokio::task::spawn_local(upstream_io);
+            tokio::task::spawn_local(client_io);
 
-        TestHarness {
-            upstream_to_gateway: client_conn,
+            frontends.push(client_conn);
+            frontend_clients.push(upstream_client);
+        }
+
+        MultiFrontendHarness {
+            frontends,
+            frontend_clients,
             agents: agent_refs,
             pool,
+            service,
         }
     }
 
@@ -334,6 +378,120 @@ mod integration {
             let prompts = harness.agents[0].prompts.lock().unwrap();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].0.starts_with("backend-session-"));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_backend_updates_route_to_last_sender() {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let mut harness = setup_multi_frontend_harness_with_agents(
+                vec![MockAgent::new()],
+                Strategy::LeastConnections,
+                2,
+            );
+            let frontend1 = harness.frontends.remove(0);
+            let frontend2 = harness.frontends.remove(0);
+            let client1 = harness.frontend_clients.remove(0);
+            let client2 = harness.frontend_clients.remove(0);
+
+            let session = frontend1
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await
+                .unwrap();
+            let (backend_sid, _, _) = harness.pool.resolve_session(&session.session_id.0).unwrap();
+
+            GatewayClient::new(harness.service.clone())
+                .session_notification(acp::SessionNotification::new(
+                    acp::SessionId::new(backend_sid.as_str()),
+                    acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new("code")),
+                ))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+
+            assert_eq!(client1.notifications.lock().unwrap().len(), 1);
+            assert!(client2.notifications.lock().unwrap().is_empty());
+
+            frontend2
+                .set_session_mode(acp::SetSessionModeRequest::new(
+                    session.session_id.clone(),
+                    "ask",
+                ))
+                .await
+                .unwrap();
+
+            GatewayClient::new(harness.service.clone())
+                .session_notification(acp::SessionNotification::new(
+                    acp::SessionId::new(backend_sid.as_str()),
+                    acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new("ask")),
+                ))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+
+            assert_eq!(client1.notifications.lock().unwrap().len(), 1);
+            assert_eq!(client2.notifications.lock().unwrap().len(), 1);
+            assert_eq!(
+                client2.notifications.lock().unwrap()[0].session_id,
+                session.session_id
+            );
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_backend_updates_prefer_active_prompt_sender() {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let mut harness = setup_multi_frontend_harness_with_agents(
+                vec![MockAgent::new().with_prompt_delay(std::time::Duration::from_millis(50))],
+                Strategy::LeastConnections,
+                2,
+            );
+            let frontend1 = harness.frontends.remove(0);
+            let frontend2 = harness.frontends.remove(0);
+            let client1 = harness.frontend_clients.remove(0);
+            let client2 = harness.frontend_clients.remove(0);
+
+            let session = frontend1
+                .new_session(acp::NewSessionRequest::new("/test"))
+                .await
+                .unwrap();
+            let prompt_session = session.session_id.clone();
+            let prompt_task = tokio::task::spawn_local(async move {
+                frontend1
+                    .prompt(acp::PromptRequest::new(
+                        prompt_session,
+                        vec!["hello".into()],
+                    ))
+                    .await
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+            frontend2
+                .set_session_mode(acp::SetSessionModeRequest::new(
+                    session.session_id.clone(),
+                    "architect",
+                ))
+                .await
+                .unwrap();
+
+            let (backend_sid, _, _) = harness.pool.resolve_session(&session.session_id.0).unwrap();
+            GatewayClient::new(harness.service.clone())
+                .session_notification(acp::SessionNotification::new(
+                    acp::SessionId::new(backend_sid.as_str()),
+                    acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new("architect")),
+                ))
+                .await
+                .unwrap();
+            tokio::task::yield_now().await;
+
+            assert_eq!(client1.notifications.lock().unwrap().len(), 1);
+            assert!(client2.notifications.lock().unwrap().is_empty());
+
+            let prompt_response = prompt_task.await.unwrap().unwrap();
+            assert_eq!(prompt_response.stop_reason, acp::StopReason::EndTurn);
         }).await;
     }
 
@@ -1020,7 +1178,7 @@ mod integration {
             // Evict session 1.
             tokio::time::advance(std::time::Duration::from_secs(601)).await;
             let evicted = harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
-            assert!(evicted.len() >= 1);
+            assert!(!evicted.is_empty());
 
             // The evicted slot should now be None (freed), so we can resolve evicted session
             // and verify the slot is available.
@@ -1127,7 +1285,7 @@ mod integration {
             // Evict session 1 to free a slot.
             tokio::time::advance(std::time::Duration::from_secs(601)).await;
             let evicted = harness.pool.evict_idle_sessions(std::time::Duration::from_secs(600));
-            assert!(evicted.len() >= 1);
+            assert!(!evicted.is_empty());
 
             // At least one slot should now be freed.
             let (_, _slot1, _) = harness.pool.resolve_session(&s1.session_id.0)

@@ -10,6 +10,7 @@ name = "acp-gateway"
 path = "src/main.rs"
 
 [dependencies]
+acp-http-transport = { path = "../../acp-http-transport" }
 agent-client-protocol = { version = "0.10", features = [] }
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }

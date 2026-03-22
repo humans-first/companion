@@ -5,14 +5,16 @@ use tracing::{error, info};
 
 use crate::config::Strategy;
 use crate::gateway;
-use crate::pool::{AgentPool, BackendSlot};
+use crate::pool::BackendSlot;
+use crate::service::GatewayService;
 
 /// Spawn a backend agent process and wire it into the pool.
 pub async fn spawn_backend(
-    pool: &AgentPool,
+    service: &GatewayService,
     agent_cmd: &str,
     slot_index: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let pool = service.pool();
     let (program, args) = parse_cmd(agent_cmd)?;
     let mut child = std::process::Command::new(&program);
     child.args(&args);
@@ -31,7 +33,7 @@ pub async fn spawn_backend(
     let child_stdout = child.stdout.take().expect("child stdout");
     info!(slot_index, pid = ?child.id(), "spawned backend agent process");
 
-    let gateway_client = gateway::GatewayClient::new(pool.clone());
+    let gateway_client = gateway::GatewayClient::new(service.clone());
     let (conn, io_task) = agent_client_protocol::ClientSideConnection::new(
         gateway_client,
         child_stdin.compat_write(),
@@ -51,6 +53,7 @@ pub async fn spawn_backend(
 
     // Run I/O task; on completion, handle crash recovery.
     let crash_pool = pool.clone();
+    let crash_service = service.clone();
     let agent_cmd_owned = agent_cmd.to_string();
     tokio::task::spawn_local(async move {
         if let Err(e) = io_task.await {
@@ -67,7 +70,7 @@ pub async fn spawn_backend(
                 info!(slot_index, attempt, delay_secs = delay.as_secs(), "respawning backend after delay");
                 tokio::time::sleep(delay).await;
 
-                match spawn_backend(&crash_pool, &agent_cmd_owned, slot_index).await {
+                match spawn_backend(&crash_service, &agent_cmd_owned, slot_index).await {
                     Ok(()) => {
                         // Replay stored init request to the new backend.
                         if let Err(e) = crash_pool.replay_init(slot_index).await {

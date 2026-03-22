@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::config::Strategy;
 use crate::error;
+use crate::service::GatewayService;
 
 // ---------------------------------------------------------------------------
 // Data structures
@@ -27,12 +28,14 @@ pub struct SessionEntry {
     pub backend_sid: String,
     pub last_activity: Instant,
     pub cwd: std::path::PathBuf,
+    pub last_sender: String,
 }
 
 pub struct EvictedSession {
     pub backend_sid: String,
     pub cwd: std::path::PathBuf,
     pub evicted_at: Instant,
+    pub last_sender: String,
 }
 
 pub struct PoolConfig {
@@ -48,7 +51,7 @@ struct PoolInner {
     reverse: HashMap<String, String>,
     evicted: HashMap<String, EvictedSession>,
     in_flight_prompts: HashSet<String>,
-    upstream: Option<acp::AgentSideConnection>,
+    prompt_senders: HashMap<String, String>,
     config: PoolConfig,
     /// Stored InitializeRequest, replayed to each new Dedicated backend.
     init_request: Option<acp::InitializeRequest>,
@@ -58,6 +61,9 @@ struct PoolInner {
 pub struct AgentPool {
     inner: Rc<RefCell<PoolInner>>,
 }
+
+#[cfg(test)]
+const DEFAULT_FRONTEND_ID: &str = "<default>";
 
 impl AgentPool {
     pub fn new(config: PoolConfig) -> Self {
@@ -73,15 +79,11 @@ impl AgentPool {
                 reverse: HashMap::new(),
                 evicted: HashMap::new(),
                 in_flight_prompts: HashSet::new(),
-                upstream: None,
+                prompt_senders: HashMap::new(),
                 config,
                 init_request: None,
             })),
         }
-    }
-
-    pub fn set_upstream(&self, conn: acp::AgentSideConnection) {
-        self.inner.borrow_mut().upstream = Some(conn);
     }
 
     // -----------------------------------------------------------------------
@@ -149,21 +151,37 @@ impl AgentPool {
         Ok(unsafe { &*(conn as *const acp::ClientSideConnection) })
     }
 
-    /// Get a reference to the upstream connection.
-    ///
-    /// SAFETY: same as backend_conn.
-    pub fn upstream_conn(&self) -> Result<&acp::AgentSideConnection, acp::Error> {
-        let inner = self.inner.borrow();
-        let conn = inner.upstream.as_ref().ok_or_else(acp::Error::internal_error)?;
-        Ok(unsafe { &*(conn as *const acp::AgentSideConnection) })
-    }
-
     // -----------------------------------------------------------------------
     // Session management
     // -----------------------------------------------------------------------
 
-    /// Register a new session mapping.
-    pub fn register_session(&self, external_sid: &str, backend_sid: &str, slot_index: usize, cwd: std::path::PathBuf) {
+    /// Register a new session mapping with a default sender.
+    #[cfg(test)]
+    pub fn register_session(
+        &self,
+        external_sid: &str,
+        backend_sid: &str,
+        slot_index: usize,
+        cwd: std::path::PathBuf,
+    ) {
+        self.register_session_for_sender(
+            external_sid,
+            backend_sid,
+            slot_index,
+            cwd,
+            DEFAULT_FRONTEND_ID,
+        );
+    }
+
+    /// Register a new session mapping for a specific sender frontend.
+    pub fn register_session_for_sender(
+        &self,
+        external_sid: &str,
+        backend_sid: &str,
+        slot_index: usize,
+        cwd: std::path::PathBuf,
+        frontend_id: &str,
+    ) {
         let mut inner = self.inner.borrow_mut();
         info!(external_sid, backend_sid, slot_index, "registered session mapping");
         inner.sessions.insert(
@@ -173,6 +191,7 @@ impl AgentPool {
                 backend_sid: backend_sid.to_string(),
                 last_activity: Instant::now(),
                 cwd,
+                last_sender: frontend_id.to_string(),
             },
         );
         inner.reverse.insert(backend_sid.to_string(), external_sid.to_string());
@@ -185,6 +204,32 @@ impl AgentPool {
     pub fn resolve_session(&self, external_sid: &str) -> Option<(String, usize, std::path::PathBuf)> {
         let inner = self.inner.borrow();
         inner.sessions.get(external_sid).map(|e| (e.backend_sid.clone(), e.slot_index, e.cwd.clone()))
+    }
+
+    /// Record which frontend most recently acted on a session.
+    pub fn record_sender(&self, external_sid: &str, frontend_id: &str) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(entry) = inner.sessions.get_mut(external_sid) {
+            entry.last_sender = frontend_id.to_string();
+        } else if let Some(entry) = inner.evicted.get_mut(external_sid) {
+            entry.last_sender = frontend_id.to_string();
+        }
+    }
+
+    /// Resolve the frontend that should receive callbacks for a session.
+    pub fn route_frontend_for_session(&self, external_sid: &str) -> Option<String> {
+        let inner = self.inner.borrow();
+        inner
+            .prompt_senders
+            .get(external_sid)
+            .cloned()
+            .or_else(|| inner.sessions.get(external_sid).map(|e| e.last_sender.clone()))
+            .or_else(|| inner.evicted.get(external_sid).map(|e| e.last_sender.clone()))
+    }
+
+    /// Resolve the external session ID for a backend session ID.
+    pub fn external_session_for_backend(&self, backend_sid: &str) -> Option<String> {
+        self.inner.borrow().reverse.get(backend_sid).cloned()
     }
 
     /// Map external → backend SessionId, or pass through if unknown.
@@ -221,6 +266,7 @@ impl AgentPool {
             if let Some(entry) = inner.sessions.remove(external_sid) {
                 inner.reverse.remove(&entry.backend_sid);
                 inner.in_flight_prompts.remove(external_sid);
+                inner.prompt_senders.remove(external_sid);
                 let slot_index = entry.slot_index;
                 if let Some(slot) = inner.slots.get_mut(slot_index).and_then(|s| s.as_mut()) {
                     slot.session_count = slot.session_count.saturating_sub(1);
@@ -229,7 +275,7 @@ impl AgentPool {
                 if inner.config.strategy == Strategy::Dedicated {
                     let should_free = inner.slots.get(slot_index)
                         .and_then(|s| s.as_ref())
-                        .map_or(false, |s| s.session_count == 0);
+                        .is_some_and(|s| s.session_count == 0);
                     if should_free {
                         info!(slot_index, "freeing dedicated slot after session close");
                         // Take the child out for graceful termination before dropping the slot.
@@ -281,10 +327,28 @@ impl AgentPool {
     // -----------------------------------------------------------------------
 
     /// Mark a session as having an in-flight prompt. Returns error if already in flight.
+    #[cfg(test)]
     pub fn begin_prompt(&self, external_sid: &str) -> Result<(), acp::Error> {
+        self.begin_prompt_for_sender(external_sid, DEFAULT_FRONTEND_ID)
+    }
+
+    /// Mark a session as having an in-flight prompt for a specific frontend.
+    pub fn begin_prompt_for_sender(
+        &self,
+        external_sid: &str,
+        frontend_id: &str,
+    ) -> Result<(), acp::Error> {
         let mut inner = self.inner.borrow_mut();
         if !inner.in_flight_prompts.insert(external_sid.to_string()) {
             return Err(error::prompt_in_flight(external_sid));
+        }
+        inner
+            .prompt_senders
+            .insert(external_sid.to_string(), frontend_id.to_string());
+        if let Some(entry) = inner.sessions.get_mut(external_sid) {
+            entry.last_sender = frontend_id.to_string();
+        } else if let Some(entry) = inner.evicted.get_mut(external_sid) {
+            entry.last_sender = frontend_id.to_string();
         }
         Ok(())
     }
@@ -293,6 +357,7 @@ impl AgentPool {
     pub fn end_prompt(&self, external_sid: &str) {
         let mut inner = self.inner.borrow_mut();
         inner.in_flight_prompts.remove(external_sid);
+        inner.prompt_senders.remove(external_sid);
     }
 
     // -----------------------------------------------------------------------
@@ -308,21 +373,38 @@ impl AgentPool {
             let mut inner = self.inner.borrow_mut();
             let now = Instant::now();
 
-            let idle: Vec<(String, String, std::path::PathBuf, usize)> = inner
+            let idle: Vec<(String, String, std::path::PathBuf, usize, String)> = inner
                 .sessions
                 .iter()
                 .filter(|(_, entry)| now.duration_since(entry.last_activity) >= timeout)
-                .map(|(ext, entry)| (ext.clone(), entry.backend_sid.clone(), entry.cwd.clone(), entry.slot_index))
+                .map(|(ext, entry)| {
+                    (
+                        ext.clone(),
+                        entry.backend_sid.clone(),
+                        entry.cwd.clone(),
+                        entry.slot_index,
+                        entry.last_sender.clone(),
+                    )
+                })
                 .collect();
 
             // Collect which dedicated slots to free so we handle each only once.
             let mut dedicated_slots_to_free: Vec<usize> = Vec::new();
 
-            for (ext_sid, backend_sid, cwd, slot_index) in idle {
+            for (ext_sid, backend_sid, cwd, slot_index, last_sender) in idle {
                 info!(external_sid = %ext_sid, "evicting idle session");
                 inner.sessions.remove(&ext_sid);
                 inner.reverse.remove(&backend_sid);
-                inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid, cwd, evicted_at: now });
+                inner.prompt_senders.remove(&ext_sid);
+                inner.evicted.insert(
+                    ext_sid.clone(),
+                    EvictedSession {
+                        backend_sid,
+                        cwd,
+                        evicted_at: now,
+                        last_sender,
+                    },
+                );
 
                 if inner.config.strategy == Strategy::Dedicated {
                     if !dedicated_slots_to_free.contains(&slot_index) {
@@ -418,17 +500,33 @@ impl AgentPool {
         }
 
         // Move all sessions on this slot to evicted.
-        let affected: Vec<(String, String, std::path::PathBuf)> = inner
+        let affected: Vec<(String, String, std::path::PathBuf, String)> = inner
             .sessions
             .iter()
             .filter(|(_, entry)| entry.slot_index == slot_index)
-            .map(|(ext, entry)| (ext.clone(), entry.backend_sid.clone(), entry.cwd.clone()))
+            .map(|(ext, entry)| {
+                (
+                    ext.clone(),
+                    entry.backend_sid.clone(),
+                    entry.cwd.clone(),
+                    entry.last_sender.clone(),
+                )
+            })
             .collect();
 
-        for (ext_sid, backend_sid, cwd) in &affected {
+        for (ext_sid, backend_sid, cwd, last_sender) in &affected {
             inner.sessions.remove(ext_sid);
             inner.reverse.remove(backend_sid);
-            inner.evicted.insert(ext_sid.clone(), EvictedSession { backend_sid: backend_sid.clone(), cwd: cwd.clone(), evicted_at: Instant::now() });
+            inner.prompt_senders.remove(ext_sid);
+            inner.evicted.insert(
+                ext_sid.clone(),
+                EvictedSession {
+                    backend_sid: backend_sid.clone(),
+                    cwd: cwd.clone(),
+                    evicted_at: Instant::now(),
+                    last_sender: last_sender.clone(),
+                },
+            );
             inner.in_flight_prompts.remove(ext_sid);
         }
 
@@ -523,9 +621,13 @@ impl AgentPool {
 
     /// Spawn a backend process into the given slot without initializing it.
     /// Used by `initialize` to spawn the first Dedicated backend for real init.
-    pub async fn spawn_backend_process(&self, slot_index: usize) -> Result<(), String> {
+    pub async fn spawn_backend_process(
+        &self,
+        service: &GatewayService,
+        slot_index: usize,
+    ) -> Result<(), String> {
         let agent_cmd = self.inner.borrow().config.agent_cmd.clone();
-        crate::spawn::spawn_backend(self, &agent_cmd, slot_index)
+        crate::spawn::spawn_backend(service, &agent_cmd, slot_index)
             .await
             .map_err(|e| e.to_string())
     }
@@ -548,8 +650,12 @@ impl AgentPool {
     /// This is used by Dedicated mode to spawn a backend on demand for
     /// `new_session` and session reload. The stored InitializeRequest is
     /// replayed to the new backend before it receives any other calls.
-    pub async fn spawn_dedicated_backend(&self, slot_index: usize) -> Result<(), String> {
-        self.spawn_backend_process(slot_index).await?;
+    pub async fn spawn_dedicated_backend(
+        &self,
+        service: &GatewayService,
+        slot_index: usize,
+    ) -> Result<(), String> {
+        self.spawn_backend_process(service, slot_index).await?;
         self.replay_init(slot_index).await
     }
 

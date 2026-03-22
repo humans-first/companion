@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use agent_client_protocol::{self as acp};
 use serde_json::value::RawValue;
-use tokio::sync::{mpsc, oneshot};
-use tracing::debug;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tracing::{debug, warn};
 
 use crate::agent_loop;
 use crate::error::HarnessError;
@@ -55,6 +56,7 @@ pub struct HarnessAgent {
     sandbox_config: SandboxConfig,
     policy: Option<ToolPolicyEngine>,
     notifier: SessionNotifier,
+    session_update_guards: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl HarnessAgent {
@@ -71,6 +73,7 @@ impl HarnessAgent {
             sandbox_config,
             policy,
             notifier,
+            session_update_guards: Mutex::new(HashMap::new()),
         }
     }
 
@@ -117,6 +120,111 @@ impl HarnessAgent {
                 )),
             ))
             .await
+    }
+
+    async fn session_update_lock(&self, session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let guard = {
+            let mut guards = self.session_update_guards.lock().await;
+            guards
+                .entry(session_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        guard.lock_owned().await
+    }
+
+    async fn rollback_mode_change(&self, session_id: &str, previous_mode_id: &str) {
+        if let Err(err) = self.sessions.set_mode(session_id, previous_mode_id).await {
+            warn!(
+                session_id,
+                previous_mode_id,
+                error = %err,
+                "failed to roll back session mode change after notification error"
+            );
+        }
+    }
+
+    async fn rollback_model_change(&self, session_id: &str, previous_model_id: &str) {
+        if let Err(err) = self.sessions.set_model(session_id, previous_model_id).await {
+            warn!(
+                session_id,
+                previous_model_id,
+                error = %err,
+                "failed to roll back session model change after notification error"
+            );
+        }
+    }
+
+    async fn apply_mode_change(
+        &self,
+        session_id: acp::SessionId,
+        mode_id: &str,
+    ) -> Result<SessionData, acp::Error> {
+        let sid = session_id.0.to_string();
+        let _guard = self.session_update_lock(&sid).await;
+        let previous = self
+            .sessions
+            .load_session(&sid, None)
+            .await
+            .map_err(acp::Error::from)?;
+        let updated = self
+            .sessions
+            .set_mode(&sid, mode_id)
+            .await
+            .map_err(acp::Error::from)?;
+
+        if let Err(err) = self
+            .send_current_mode_update(session_id.clone(), updated.mode_id.clone())
+            .await
+        {
+            self.rollback_mode_change(&sid, &previous.mode_id).await;
+            return Err(err);
+        }
+
+        if let Err(err) = self
+            .send_config_option_update(
+                session_id,
+                self.session_config_options(&updated.mode_id, &updated.model_id),
+            )
+            .await
+        {
+            self.rollback_mode_change(&sid, &previous.mode_id).await;
+            return Err(err);
+        }
+
+        Ok(updated)
+    }
+
+    async fn apply_model_change(
+        &self,
+        session_id: acp::SessionId,
+        model_id: &str,
+    ) -> Result<SessionData, acp::Error> {
+        let sid = session_id.0.to_string();
+        let _guard = self.session_update_lock(&sid).await;
+        let previous = self
+            .sessions
+            .load_session(&sid, None)
+            .await
+            .map_err(acp::Error::from)?;
+        let updated = self
+            .sessions
+            .set_model(&sid, model_id)
+            .await
+            .map_err(acp::Error::from)?;
+
+        if let Err(err) = self
+            .send_config_option_update(
+                session_id,
+                self.session_config_options(&updated.mode_id, &updated.model_id),
+            )
+            .await
+        {
+            self.rollback_model_change(&sid, &previous.model_id).await;
+            return Err(err);
+        }
+
+        Ok(updated)
     }
 
     fn available_modes(&self) -> Vec<acp::SessionMode> {
@@ -337,7 +445,7 @@ impl acp::Agent for HarnessAgent {
             Ok(content) => {
                 self.send_agent_message(args.session_id, content).await?;
                 self.sessions
-                    .commit_prompt(&sid, turn.session)
+                    .commit_prompt(&sid, turn.base_history_len, turn.session)
                     .await
                     .map_err(acp::Error::from)?;
                 Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
@@ -356,18 +464,8 @@ impl acp::Agent for HarnessAgent {
         &self,
         args: acp::SetSessionModeRequest,
     ) -> Result<acp::SetSessionModeResponse, acp::Error> {
-        let updated = self
-            .sessions
-            .set_mode(args.session_id.0.as_ref(), args.mode_id.0.as_ref())
-            .await
-            .map_err(acp::Error::from)?;
-        self.send_current_mode_update(args.session_id.clone(), updated.mode_id.clone())
+        self.apply_mode_change(args.session_id, args.mode_id.0.as_ref())
             .await?;
-        self.send_config_option_update(
-            args.session_id,
-            self.session_config_options(&updated.mode_id, &updated.model_id),
-        )
-        .await?;
         Ok(acp::SetSessionModeResponse::new())
     }
 
@@ -375,16 +473,8 @@ impl acp::Agent for HarnessAgent {
         &self,
         args: acp::SetSessionModelRequest,
     ) -> Result<acp::SetSessionModelResponse, acp::Error> {
-        let updated = self
-            .sessions
-            .set_model(args.session_id.0.as_ref(), args.model_id.0.as_ref())
-            .await
-            .map_err(acp::Error::from)?;
-        self.send_config_option_update(
-            args.session_id,
-            self.session_config_options(&updated.mode_id, &updated.model_id),
-        )
-        .await?;
+        self.apply_model_change(args.session_id, args.model_id.0.as_ref())
+            .await?;
         Ok(acp::SetSessionModelResponse::new())
     }
 
@@ -393,28 +483,20 @@ impl acp::Agent for HarnessAgent {
         args: acp::SetSessionConfigOptionRequest,
     ) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
         let updated = match args.config_id.0.as_ref() {
-            MODE_CONFIG_ID => self
-                .sessions
-                .set_mode(args.session_id.0.as_ref(), args.value.0.as_ref())
-                .await
-                .map_err(acp::Error::from)?,
-            MODEL_CONFIG_ID => self
-                .sessions
-                .set_model(args.session_id.0.as_ref(), args.value.0.as_ref())
-                .await
-                .map_err(acp::Error::from)?,
+            MODE_CONFIG_ID => {
+                self.apply_mode_change(args.session_id.clone(), args.value.0.as_ref())
+                    .await?
+            }
+            MODEL_CONFIG_ID => {
+                self.apply_model_change(args.session_id.clone(), args.value.0.as_ref())
+                    .await?
+            }
             other => {
                 return Err(acp::Error::invalid_params().data(format!("unknown config id: {other}")))
             }
         };
 
         let config_options = self.session_config_options(&updated.mode_id, &updated.model_id);
-        if args.config_id.0.as_ref() == MODE_CONFIG_ID {
-            self.send_current_mode_update(args.session_id.clone(), updated.mode_id.clone())
-                .await?;
-        }
-        self.send_config_option_update(args.session_id, config_options.clone())
-            .await?;
         Ok(acp::SetSessionConfigOptionResponse::new(config_options))
     }
 
@@ -1028,6 +1110,62 @@ mod tests {
                     notifications[0].update,
                     acp::SessionUpdate::ConfigOptionUpdate(_)
                 ));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_session_mode_rolls_back_when_notification_delivery_fails() {
+        let local_set = tokio::task::LocalSet::new();
+        local_set
+            .run_until(async {
+                let (notifier, rx) = session_notifier_channel();
+                drop(rx);
+                let (provider, _requested_models) = immediate_provider("unused");
+                let agent = agent_with_provider(Arc::new(provider), notifier);
+
+                let session_id = new_session(&agent).await;
+                let _err = agent
+                    .set_session_mode(acp::SetSessionModeRequest::new(
+                        session_id.clone(),
+                        "ask",
+                    ))
+                    .await
+                    .unwrap_err();
+                let loaded = agent
+                    .sessions
+                    .load_session(session_id.0.as_ref(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(loaded.mode_id, "code");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_session_model_rolls_back_when_notification_delivery_fails() {
+        let local_set = tokio::task::LocalSet::new();
+        local_set
+            .run_until(async {
+                let (notifier, rx) = session_notifier_channel();
+                drop(rx);
+                let (provider, _requested_models) = immediate_provider("unused");
+                let agent = agent_with_provider(Arc::new(provider), notifier);
+
+                let session_id = new_session(&agent).await;
+                let _err = agent
+                    .set_session_model(acp::SetSessionModelRequest::new(
+                        session_id.clone(),
+                        "backup-model",
+                    ))
+                    .await
+                    .unwrap_err();
+                let loaded = agent
+                    .sessions
+                    .load_session(session_id.0.as_ref(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(loaded.model_id, "test-model");
             })
             .await;
     }

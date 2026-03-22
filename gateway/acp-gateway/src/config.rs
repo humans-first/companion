@@ -1,13 +1,18 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "acp-gateway", about = "ACP gateway with Cedar authorization and agent process pooling")]
 pub struct Config {
     /// Command to spawn ACP agent processes (e.g. "kiro cli acp")
     #[arg(long, required = true)]
     pub agent_cmd: String,
+
+    /// Transport exposed to the upstream ACP client.
+    #[arg(long, value_enum, default_value = "stdio")]
+    pub transport: Transport,
 
     /// Load balancing strategy
     #[arg(long, value_enum, default_value = "least-connections")]
@@ -35,6 +40,18 @@ pub struct Config {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     pub log_level: String,
+
+    /// Bind address for the HTTP transport.
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    pub http_bind: SocketAddr,
+
+    /// Maximum accepted ACP message size over HTTP, in bytes.
+    #[arg(long, default_value_t = 1024 * 1024)]
+    pub http_max_message_bytes: usize,
+
+    /// Maximum buffered outbound ACP messages per HTTP connection.
+    #[arg(long, default_value_t = 256)]
+    pub http_max_buffered_messages: usize,
 }
 
 /// Load balancing strategy for routing sessions to agent processes.
@@ -49,4 +66,10 @@ pub struct Config {
 pub enum Strategy {
     LeastConnections,
     Dedicated,
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Stdio,
+    Http,
 }

@@ -266,7 +266,7 @@ mod tests {
     // Use thread_local to hold TempDir so it lives as long as the test.
     // TempDir is deleted on drop, so we need it to outlive the test function body.
     thread_local! {
-        static TEMP_DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> = std::cell::RefCell::new(Vec::new());
+        static TEMP_DIRS: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
     fn tempdir() -> std::path::PathBuf {

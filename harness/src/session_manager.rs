@@ -52,6 +52,7 @@ pub struct PromptTurn {
     pub runtime: Rc<SessionToolRuntime>,
     pub cancellation: CancellationToken,
     pub principal: String,
+    pub base_history_len: usize,
 }
 
 pub struct SessionManager {
@@ -173,6 +174,7 @@ impl SessionManager {
         session_id: &str,
         mode_id: &str,
     ) -> Result<SessionData, HarnessError> {
+        self.ensure_no_prompt_in_flight(session_id).await?;
         if self.mode_definition(mode_id).is_none() {
             return Err(HarnessError::Tool(format!("unknown mode id: {mode_id}")));
         }
@@ -193,6 +195,7 @@ impl SessionManager {
         session_id: &str,
         model_id: &str,
     ) -> Result<SessionData, HarnessError> {
+        self.ensure_no_prompt_in_flight(session_id).await?;
         if !self.supports_model(model_id) {
             return Err(HarnessError::Tool(format!("unknown model id: {model_id}")));
         }
@@ -211,6 +214,7 @@ impl SessionManager {
     ) -> Result<PromptTurn, HarnessError> {
         let mut session = self.store.load(session_id).await?;
         let cancellation = self.begin_turn(session_id).await?;
+        let base_history_len = session.history.len();
         session.history.push(ConversationMessage::user(user_text));
         let runtime_result = self
             .tool_runtime
@@ -229,15 +233,27 @@ impl SessionManager {
             runtime,
             cancellation,
             principal: principal.unwrap_or_else(|| DEFAULT_PRINCIPAL.to_string()),
+            base_history_len,
         })
     }
 
     pub async fn commit_prompt(
         &self,
         session_id: &str,
+        base_history_len: usize,
         session: SessionData,
     ) -> Result<(), HarnessError> {
-        self.store.save(session_id, session).await
+        if session.history.len() < base_history_len {
+            return Err(HarnessError::Tool(
+                "prompt session history regressed during commit".to_string(),
+            ));
+        }
+
+        let mut current = self.store.load(session_id).await?;
+        current
+            .history
+            .extend(session.history.into_iter().skip(base_history_len));
+        self.store.save(session_id, current).await
     }
 
     pub async fn finish_prompt(&self, session_id: &str) {
@@ -275,6 +291,13 @@ impl SessionManager {
         let token = CancellationToken::new();
         active_turns.insert(session_id.to_string(), token.clone());
         Ok(token)
+    }
+
+    async fn ensure_no_prompt_in_flight(&self, session_id: &str) -> Result<(), HarnessError> {
+        if self.active_turns.lock().await.contains_key(session_id) {
+            return Err(HarnessError::PromptInFlight(session_id.to_string()));
+        }
+        Ok(())
     }
 
     fn tool_sources_for_mode(&self, mode_id: &str) -> Vec<String> {
@@ -483,6 +506,60 @@ mod tests {
 
         assert!(!Rc::ptr_eq(&first, &second));
         assert_eq!(second.active_sources(), &["beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn set_mode_and_model_are_rejected_while_prompt_is_in_flight() {
+        let manager = manager();
+        let (session_id, _) = manager.new_session(PathBuf::from("/tmp")).await.unwrap();
+
+        let turn = manager
+            .begin_prompt(&session_id, None, "hello".to_string())
+            .await
+            .unwrap();
+
+        let mode_err = manager.set_mode(&session_id, "ask").await.unwrap_err();
+        assert!(matches!(mode_err, HarnessError::PromptInFlight(_)));
+
+        let model_err = manager
+            .set_model(&session_id, "backup-model")
+            .await
+            .unwrap_err();
+        assert!(matches!(model_err, HarnessError::PromptInFlight(_)));
+
+        manager.finish_prompt(&turn.session_id).await;
+    }
+
+    #[tokio::test]
+    async fn commit_prompt_merges_history_onto_latest_session_state() {
+        let manager = manager();
+        let (session_id, _) = manager.new_session(PathBuf::from("/tmp")).await.unwrap();
+
+        let mut turn = manager
+            .begin_prompt(&session_id, None, "hello".to_string())
+            .await
+            .unwrap();
+        turn.session
+            .history
+            .push(ConversationMessage::assistant("hi".to_string()));
+
+        let mut stored = manager.store.load(&session_id).await.unwrap();
+        stored.cwd = PathBuf::from("/workspace");
+        stored.model_id = "backup-model".to_string();
+        manager.store.save(&session_id, stored).await.unwrap();
+
+        manager
+            .commit_prompt(&session_id, turn.base_history_len, turn.session)
+            .await
+            .unwrap();
+        manager.finish_prompt(&session_id).await;
+
+        let loaded = manager.load_session(&session_id, None).await.unwrap();
+        assert_eq!(loaded.cwd, PathBuf::from("/workspace"));
+        assert_eq!(loaded.model_id, "backup-model");
+        assert_eq!(loaded.history.len(), 2);
+        assert_eq!(loaded.history[0].content.as_deref(), Some("hello"));
+        assert_eq!(loaded.history[1].content.as_deref(), Some("hi"));
     }
 
     #[test]

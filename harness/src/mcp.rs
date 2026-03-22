@@ -1,4 +1,3 @@
-use std::io::ErrorKind;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -10,19 +9,6 @@ use tracing::debug;
 
 use crate::config::McpServerConfig;
 use crate::tool::{ToolCallContext, ToolInfo, ToolKey, ToolSchema, ToolSource, ToolSourceFactory};
-
-const MAX_RETRIES: u32 = 3;
-
-fn is_transient_io_error(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        ErrorKind::ConnectionRefused
-            | ErrorKind::TimedOut
-            | ErrorKind::BrokenPipe
-            | ErrorKind::UnexpectedEof
-            | ErrorKind::ConnectionReset
-    )
-}
 
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -184,105 +170,66 @@ impl McpClient {
             serde_json::to_string(&request).map_err(|e| format!("serialize request: {e}"))?;
         line.push('\n');
 
-        let mut last_err = String::new();
-        for attempt in 0..MAX_RETRIES {
-            if attempt > 0 {
-                let backoff = Duration::from_millis(100 * (1u64 << attempt));
-                debug!(attempt, method, ?backoff, "retrying MCP request");
-                tokio::time::sleep(backoff).await;
-            }
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("write to MCP server: {e}"))?;
+        self.stdin
+            .flush()
+            .await
+            .map_err(|e| format!("flush MCP server stdin: {e}"))?;
 
-            // Write request.
-            if let Err(e) = self.stdin.write_all(line.as_bytes()).await {
-                last_err = format!("write to MCP server: {e}");
-                if is_transient_io_error(&e) {
-                    continue;
+        // Read response with a deadline, skipping notifications.
+        let deadline = tokio::time::Instant::now() + MCP_REQUEST_TIMEOUT;
+        loop {
+            let mut response_line = String::new();
+            let read_result =
+                tokio::time::timeout_at(deadline, self.stdout.read_line(&mut response_line))
+                    .await;
+
+            let bytes_read = match read_result {
+                Ok(Ok(n)) => n,
+                Ok(Err(e)) => return Err(format!("read from MCP server: {e}")),
+                Err(_) => {
+                    return Err(format!(
+                        "MCP request '{method}' timed out after {}s",
+                        MCP_REQUEST_TIMEOUT.as_secs()
+                    ))
                 }
-                return Err(last_err);
-            }
-            if let Err(e) = self.stdin.flush().await {
-                last_err = format!("flush MCP server stdin: {e}");
-                if is_transient_io_error(&e) {
-                    continue;
-                }
-                return Err(last_err);
-            }
-
-            // Read response with a per-attempt deadline (skips notifications).
-            let deadline = tokio::time::Instant::now() + MCP_REQUEST_TIMEOUT;
-            let result: Result<serde_json::Value, (String, bool)> = loop {
-                let mut response_line = String::new();
-                let read_result =
-                    tokio::time::timeout_at(deadline, self.stdout.read_line(&mut response_line))
-                        .await;
-
-                let bytes_read = match read_result {
-                    Ok(Ok(n)) => n,
-                    Ok(Err(e)) => {
-                        let retryable = is_transient_io_error(&e);
-                        break Err((format!("read from MCP server: {e}"), retryable));
-                    }
-                    Err(_) => {
-                        break Err((
-                            format!(
-                                "MCP request '{method}' timed out after {}s",
-                                MCP_REQUEST_TIMEOUT.as_secs()
-                            ),
-                            true,
-                        ))
-                    }
-                };
-
-                if bytes_read == 0 {
-                    break Err(("MCP server closed stdout".to_string(), false));
-                }
-
-                let trimmed = response_line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                let response: JsonRpcResponse = match serde_json::from_str(trimmed) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        break Err((format!("parse MCP response: {e} (line: {trimmed})"), false))
-                    }
-                };
-
-                if response.id.is_none() {
-                    debug!(line = trimmed, "skipping MCP notification");
-                    continue;
-                }
-
-                if response.id != Some(id) {
-                    break Err((
-                        format!(
-                            "MCP response id mismatch: expected {id}, got {:?}",
-                            response.id
-                        ),
-                        false,
-                    ));
-                }
-
-                if let Some(err) = response.error {
-                    break Err((format!("MCP error {}: {}", err.code, err.message), false));
-                }
-
-                break response
-                    .result
-                    .ok_or_else(|| ("MCP response has no result".to_string(), false));
             };
 
-            match result {
-                Ok(value) => return Ok(value),
-                Err((msg, true)) if attempt + 1 < MAX_RETRIES => {
-                    last_err = msg;
-                }
-                Err((msg, _)) => return Err(msg),
+            if bytes_read == 0 {
+                return Err("MCP server closed stdout".to_string());
             }
-        }
 
-        Err(last_err)
+            let trimmed = response_line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let response: JsonRpcResponse = serde_json::from_str(trimmed)
+                .map_err(|e| format!("parse MCP response: {e} (line: {trimmed})"))?;
+
+            if response.id.is_none() {
+                debug!(line = trimmed, "skipping MCP notification");
+                continue;
+            }
+
+            if response.id != Some(id) {
+                return Err(format!(
+                    "MCP response id mismatch: expected {id}, got {:?}",
+                    response.id
+                ));
+            }
+
+            if let Some(err) = response.error {
+                return Err(format!("MCP error {}: {}", err.code, err.message));
+            }
+
+            return response
+                .result
+                .ok_or_else(|| "MCP response has no result".to_string());
+        }
     }
 
     async fn send_notification(&mut self, method: &str) -> Result<(), String> {
