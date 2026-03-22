@@ -1,153 +1,136 @@
 # acp-gateway
 
-An [ACP](https://github.com/anthropics/agent-client-protocol) gateway proxy that sits between an editor (Zed, VS Code, etc.) and one or more ACP agent processes. It provides session multiplexing, process pooling, idle eviction with transparent reload, crash recovery, Cedar-based authorization, and pool health monitoring.
+`acp-gateway` is an ACP proxy that sits between one or more upstream clients and a pool of backend ACP agent processes.
 
+It exists to solve the infrastructure concerns that individual ACP backends should not have to own:
+
+- external session IDs and backend session remapping
+- process pooling and placement
+- prompt serialization and session routing
+- optional Cedar authorization at the gateway edge
+- exposing ACP over `stdio` or over the repo's reusable HTTP transport
+
+## Current Role In The Stack
+
+```text
+ACP client or connector  <-->  acp-gateway  <-->  backend ACP agent(s)
+Zed / Telegram / curl           |                    harness / other agents
+                                \-> session routing
+                                \-> pooling
+                                \-> Cedar authz
 ```
-┌────────┐         ┌─────────────┐        ┌─────────┐
-│ Editor │◄──ACP──►│ acp-gateway │◄──ACP──►│ Agent 0 │
-└────────┘  stdin/  │             │         └─────────┘
-            stdout  │  session    │         ┌─────────┐
-                    │  routing    │◄──ACP──►│ Agent 1 │
-                    │  + Cedar    │         └─────────┘
-                    │  authz      │         ┌─────────┐
-                    │             │◄──ACP──►│ Agent N │
-                    └─────────────┘         └─────────┘
-```
 
-The gateway exposes a single ACP connection on stdin/stdout. Internally it manages a pool of backend agent processes, each also connected via ACP over stdin/stdout. Session IDs are rewritten so the upstream client never sees backend-internal identifiers.
+In HTTP mode, the gateway runs as a shared multi-frontend service. Each frontend gets its own ACP connection, while the backend pool is shared.
 
-## Quick start
+## What It Does Today
+
+- Exposes ACP over `stdio` or a custom HTTP transport
+- Supports `dedicated` and `least-connections` backend placement strategies
+- Rewrites session IDs so upstream clients do not see backend-internal IDs
+- Tracks the last sender for each session and pins prompt-time callbacks to the active prompt sender
+- Supports idle eviction and transparent reload when the backend supports it
+- Optionally authorizes prompt requests with Cedar policies
+- Exposes a `gateway/status` extension method for pool inspection
+
+## Quick Start
+
+Build it:
 
 ```sh
 cargo build --release
-
-# Dedicated mode (default for single-user): one process per session
-acp-gateway --agent-cmd "kiro-cli acp -a" --strategy dedicated --pool-size 8
-
-# Least-connections mode: fixed pool, sessions distributed by load
-acp-gateway --agent-cmd "kiro-cli acp -a" --strategy least-connections --pool-size 4
 ```
 
-In an editor like Zed, configure it as a custom agent:
+Run it over `stdio` in front of the harness:
 
-```json
-{
-  "agent": {
-    "type": "custom",
-    "command": "acp-gateway",
-    "args": ["--agent-cmd", "kiro-cli acp -a", "--strategy", "dedicated"]
-  }
-}
+```sh
+./target/release/acp-gateway \
+  --agent-cmd "/Users/igaray/projects/companion/repo/companion/harness/target/release/harness --config /Users/igaray/projects/companion/repo/companion/harness/examples/local.json" \
+  --strategy dedicated \
+  --idle-timeout-secs 0
 ```
+
+Run it over HTTP:
+
+```sh
+./target/release/acp-gateway \
+  --transport http \
+  --http-bind 127.0.0.1:8787 \
+  --agent-cmd "/Users/igaray/projects/companion/repo/companion/harness/target/release/harness --config /Users/igaray/projects/companion/repo/companion/harness/examples/local.json" \
+  --strategy dedicated \
+  --idle-timeout-secs 0
+```
+
+The HTTP surface is provided by [`acp-http-transport`](../../acp-http-transport/).
 
 ## Strategies
 
-### Dedicated (recommended for most use cases)
+### `dedicated`
 
-One backend process per session, spawned on demand, killed when the session is evicted or closed. Best for isolation: each session gets its own process with independent state.
+One backend process per session, spawned on demand.
 
-- `--pool-size` sets the maximum number of concurrent sessions/processes.
-- Idle sessions are evicted after `--idle-timeout-secs` (default 600s). The process is gracefully terminated (SIGTERM, then SIGKILL after 500ms).
-- Evicted sessions are transparently reloaded on the next prompt via `load_session` on a fresh backend.
+Use this when you want:
 
-### Least-connections
+- isolation between sessions
+- simpler backend reasoning
+- a better fit for agents that keep meaningful in-process state
 
-A fixed pool of `--pool-size` backend processes is spawned at startup. New sessions are routed to the process with the fewest active sessions. Best for high session throughput with shared backends.
+### `least-connections`
 
-- Backend processes are automatically respawned on crash (exponential backoff, up to 5 retries).
-- Idle sessions are evicted but the backend process stays alive.
+A fixed pool of backend processes spawned up front. New sessions are assigned to the least-loaded backend.
 
-## Cedar authorization
+Use this when you want:
 
-Optionally gate `prompt` requests with [Cedar](https://www.cedarpolicy.com/) policies:
+- lower process churn
+- a smaller fixed backend fleet
+- a better fit for lightweight shared backends
+
+## Cedar Authorization
+
+Prompt requests can be gated with Cedar:
 
 ```sh
-acp-gateway --agent-cmd "..." --policy-dir ./policies/ --schema-file ./policies/schema.cedarschema
+./target/release/acp-gateway \
+  --agent-cmd "..." \
+  --policy-dir ./policies \
+  --schema-file ./policies/schema.cedarschema
 ```
 
-The gateway extracts `principal`, `action`, and `resource` from the ACP request's `_meta` field and evaluates them against the loaded policies. If no policy permits the request, it is denied with error code `-32004`.
+The gateway reads `principal`, `action`, and `resource` from ACP request `_meta`.
 
-Example `_meta`:
+Example:
+
 ```json
 {
   "_meta": {
     "principal": "User::\"alice\"",
     "action": "Action::\"prompt\"",
-    "resource": "Agent::\"kiro\""
+    "resource": "Agent::\"companion\""
   }
 }
 ```
 
-Example Cedar policy (`policies/allow-all.cedar`):
-```
-permit(principal, action, resource);
-```
+## HTTP Mode
 
-## CLI flags
+The gateway can act as an ACP server over HTTP by using the transport crate in this repo. In that mode it exposes ACP through:
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--agent-cmd` | (required) | Shell command to spawn backend agents |
-| `--strategy` | `least-connections` | `dedicated` or `least-connections` |
-| `--pool-size` | `4` | Max processes (dedicated) or fixed pool size (LC) |
-| `--policy-dir` | (none) | Directory of `.cedar` policy files |
-| `--schema-file` | (none) | `.cedarschema` file for policy validation |
-| `--idle-timeout-secs` | `600` | Idle session eviction timeout (0 = disabled) |
-| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
+- `POST /v1/acp/connections`
+- `GET /v1/acp/connections/{id}/stream`
+- `POST /v1/acp/connections/{id}/messages`
+- `DELETE /v1/acp/connections/{id}`
 
-## Pool health
+This is a custom transport layer for ACP, not a replacement for ACP itself.
 
-Query pool status at runtime via the `gateway/status` ACP extension method. The response includes slot states, session counts, and eviction stats:
+## Important Limits
 
-```json
-{
-  "strategy": "Dedicated",
-  "pool_size": 4,
-  "alive_slots": 2,
-  "dead_slots": 0,
-  "empty_slots": 2,
-  "active_sessions": 2,
-  "evicted_sessions": 1,
-  "in_flight_prompts": 0,
-  "slots": [...]
-}
-```
+- Session mappings are in memory inside the gateway process.
+- Transparent reload only works as well as the backend's `load_session` and `resume_session` support.
+- The current harness binary uses an in-memory session store by default, so if you want stable continuity through restarts or eviction, that storage layer still needs to arrive first.
+- Unscoped backend extension callbacks are ambiguous when multiple frontends are connected, so those flows are only safe when one frontend is attached.
+- HTTP mode currently provides transport, not TLS termination or gateway-level authentication.
 
-The gateway also logs pool health every 5 minutes to stderr (JSON structured logging).
+## Unstable ACP Methods
 
-## Session lifecycle
-
-```
-new_session ──► register mapping (external UUID ↔ backend ID)
-                assign to slot (LC: least loaded, Dedicated: spawn new)
-
-prompt ────────► check Cedar policy
-                 check prompt guard (one prompt per session at a time)
-                 if session evicted: transparent reload via load_session
-                 forward to backend with rewritten session ID
-
-idle timeout ──► evict session to evicted map
-                 Dedicated: graceful kill (SIGTERM → SIGKILL)
-                 LC: decrement session count, keep process alive
-
-next prompt ───► detect eviction, select new slot
-                 load_session on new backend
-                 re-register mapping, forward prompt
-
-backend crash ─► move all sessions on that slot to evicted
-                 clear in-flight prompts
-                 LC: respawn with exponential backoff
-                 Dedicated: free slot for reuse
-```
-
-## Unstable ACP features
-
-Build with `--features unstable` to enable support for unstable ACP methods:
-
-- `close_session` — explicit session close with Dedicated slot cleanup
-- `fork_session` — fork a session, registering the new session with a fresh external ID
-- `resume_session` — resume with transparent eviction reload
-- `set_session_model` — forwarded to backend
+Build with `--features unstable` if you want the gateway to forward unstable ACP session methods such as close, fork, resume, and set-model:
 
 ```sh
 cargo build --release --features unstable
@@ -156,9 +139,8 @@ cargo build --release --features unstable
 ## Development
 
 ```sh
-cargo test          # 58 tests (unit + integration)
-cargo build         # standard build
-cargo build --features unstable  # with unstable ACP methods
+cargo test
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 ## License

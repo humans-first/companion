@@ -1,95 +1,46 @@
 # Companion Website
 
-A static website showcasing Companion - your AI growth partner that works backwards from your goals.
+This directory contains the lightweight static website for the Companion project.
 
-## 🚀 Live Demo
+It is separate from the ACP runtime work in the rest of the repo. Think of it as the landing page and messaging layer, not part of the gateway or harness stack.
 
-Visit the live website: [companion-website.vercel.app](https://companion-website.vercel.app)
+## Stack
 
-## 🛠️ Development
+- plain HTML, CSS, and JavaScript
+- no framework build step
+- Vercel configuration in `vercel.json`
 
-This is a static website built with vanilla HTML, CSS, and JavaScript.
+## Local Development
 
-### Local Development
-
-```bash
-# Serve locally on port 3000
+```sh
 npm run dev
+```
 
-# Or use any static server
+That serves the site on port `3000`.
+
+You can also use any static file server:
+
+```sh
 python3 -m http.server 3000
 ```
 
-### Project Structure
+## Files
 
-```
-poc-site/
-├── index.html          # Main website
-├── styles.css          # Styling and animations
-├── script.js           # Interactive functionality
-├── vercel.json         # Vercel deployment config
-└── package.json        # Project metadata
-```
+- `index.html`: page content
+- `styles.css`: site styling
+- `script.js`: client-side interactions
+- `vercel.json`: deployment and response-header configuration
 
-## 🚀 Deployment
+## Deployment
 
-### Automatic Deployment
+The site can be deployed directly from this directory with Vercel:
 
-This site is automatically deployed to Vercel via GitHub Actions:
-
-- **Production**: Deploys on push to `main` branch
-- **Preview**: Deploys on pull requests
-- **Trigger**: Only when files in `poc-site/` change
-
-### Manual Deployment
-
-```bash
-# Install Vercel CLI
-npm install -g vercel
-
-# Deploy from poc-site folder
-cd poc-site
+```sh
 vercel --prod
 ```
 
-## 🔧 GitHub Actions Setup
+There is also a repository workflow under `.github/workflows/deploy.yml` for Vercel-based site deployment.
 
-The repository uses GitHub Actions for automated deployments. Required secrets:
+## Scope
 
-- `VERCEL_TOKEN`: Your Vercel API token
-- `VERCEL_ORG_ID`: Your Vercel organization ID  
-- `VERCEL_PROJECT_ID`: Your Vercel project ID
-
-See [setup instructions](../docs/deployment-setup.md) for details.
-
-## 📱 Features
-
-- **Responsive Design**: Mobile-first responsive layout
-- **Smooth Animations**: Scroll-triggered animations and effects
-- **Interactive Elements**: Hover effects and smooth scrolling
-- **Email Signup**: Early access signup form with validation
-- **SEO Optimized**: Meta tags and semantic HTML
-- **Fast Loading**: Optimized assets and minimal dependencies
-
-## 🎨 Design System
-
-- **Primary Color**: #6366f1 (Indigo)
-- **Font**: Inter (Google Fonts)
-- **Animations**: CSS transitions and transforms
-- **Mobile Breakpoints**: 768px, 480px
-
-## 📄 Content Sections
-
-1. **Hero**: Emotional hook with founder story
-2. **Problem**: Current AI frustrations
-3. **Solution**: How Companion works (4 steps)
-4. **Examples**: Real-world use cases
-5. **Safety**: Trust and security messaging
-6. **CTA**: Early access signup
-
-## 🔒 Security Headers
-
-The site includes security headers via `vercel.json`:
-- X-Content-Type-Options: nosniff
-- X-Frame-Options: DENY
-- X-XSS-Protection: 1; mode=block
+The website is still a simple project-facing POC site. It does not mirror every infrastructure change in the repo, and it is intentionally much smaller in scope than the ACP gateway and harness work.

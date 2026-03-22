@@ -1,94 +1,99 @@
 # Companion
 
-A multi-channel agentic companion platform. Connect AI companions to users across Telegram, Slack, WhatsApp, desktop apps, and more — all through the open [Agent Client Protocol (ACP)](https://agentclientprotocol.org/).
+Companion is an ACP-native toolkit for building agent systems that can sit behind editors, chat connectors, and custom transports.
+
+Today the repo is centered on four infrastructure pieces:
+
+- `gateway/acp-gateway`: a multi-session ACP proxy with pooling, routing, and optional Cedar authorization
+- `harness`: a stateless ACP backend that talks to an LLM, exposes MCP-backed tools, and runs code in a hardened Python sandbox
+- `acp-http-transport`: a reusable HTTP transport crate that lets ACP clients and servers speak ACP over a custom streamable HTTP interface
+- `connectors/telegram-acp`: a Telegram connector that bridges chats to any ACP-speaking backend
+
+There is also a small static landing page under `poc-site/`.
 
 ## Architecture
 
-```
-                  ┌──────────┐
-                  │ Telegram │
-                  └────┬─────┘
-                       │
-┌──────────┐      ┌────▼─────────┐      ┌───────────────┐      ┌───────────┐
-│  Slack   ├─ACP─►│              │      │               │      │ ACP Agent │
-└──────────┘      │  ACP Gateway │─ACP─►│  ACP Process  │◄────►│ (Kiro,    │
-┌──────────┐      │              │      │  (companion)  │      │  Claude,  │
-│ WhatsApp ├─ACP─►│  - pooling   │      │               │      │  etc.)    │
-└──────────┘      │  - sessions  │      └───────────────┘      └───────────┘
-┌──────────┐      │  - Cedar     │      ┌───────────────┐
-│ Desktop  ├─ACP─►│    authz     │─ACP─►│  ACP Process  │
-└──────────┘      └──────────────┘      └───────────────┘
+```text
+ACP clients/connectors        ACP infrastructure                   Runtime
+----------------------        ------------------                   -------
+Zed / Telegram / curl  <-->   acp-gateway or direct harness  <-->  LLM provider
+                              ^                                 \-> MCP tool sources
+                              |
+                              \-> optional acp-http-transport    \-> Python sandbox
+                                  for custom HTTP ACP
 ```
 
-**Connectors** (Telegram, Slack, etc.) are ACP clients that speak the protocol directly to the **ACP Gateway**. The gateway handles session multiplexing, process pooling, and Cedar-based authorization. Backend **ACP processes** are stateless runtimes that load companion configuration and execute prompts.
+The current shape of the system is:
 
-This design means any ACP-compatible agent works as a backend, and any ACP client works as a connector — the gateway is a protocol-aware proxy, not a translator.
+- ACP is the contract between components
+- the gateway is the session-aware proxy
+- the harness is the backend execution layer
+- the HTTP transport is reusable glue, not gateway-specific
 
-## Components
+## Where We Are
+
+What is solid today:
+
+- The gateway can expose ACP over `stdio` or over a custom HTTP transport.
+- The harness supports ACP session lifecycle methods, session modes, per-session model selection, MCP-backed tool runtimes, tool policies, and a hardened `execute` path.
+- The HTTP transport crate is reusable on both the client and server side of the ACP SDK.
+- Local coverage and workspace-wide Rust testing are wired at the repo root.
+
+What is intentionally still in progress:
+
+- Durable off-process session and history management
+- Conversation compaction and longer-term memory handling
+- Streaming token-by-token LLM responses
+- VM or container-grade sandbox isolation
+- Automatic MCP health probing and reconnection
+
+## Repository Guide
+
+### [`acp-http-transport`](acp-http-transport/)
+
+A standalone Rust crate for ACP over custom streamable HTTP. It is designed to plug into the normal ACP SDK connection constructors instead of inventing a separate protocol stack.
 
 ### [`gateway/acp-gateway`](gateway/acp-gateway/)
 
-The core infrastructure component. A Rust binary that proxies ACP connections between upstream clients and a pool of backend agent processes.
+A Rust ACP gateway that sits between upstream clients and backend ACP agents. It handles session ID translation, backend process pooling, frontend-aware routing, idle eviction, and optional Cedar authorization.
 
-- **Process pooling**: Dedicated (one process per session) or least-connections (fixed pool, load-balanced)
-- **Session management**: External UUID mapping, idle eviction with transparent reload
-- **Cedar authorization**: Policy-based access control on prompt requests
-- **Crash recovery**: Automatic respawn (LC mode) with exponential backoff
-- **Health monitoring**: `gateway/status` extension method + periodic logging
+### [`harness`](harness/)
+
+A Rust ACP backend for local and self-hosted model setups. It layers ACP handling, session management, per-session tool runtimes, MCP integration, and a hardened Python execution path.
 
 ### [`connectors/telegram-acp`](connectors/telegram-acp/)
 
-A Python package that bridges Telegram bots to any ACP-compatible agent. One ACP subprocess serves all chats, each getting its own session.
-
-- Group chat support (responds on @mention or reply)
-- Message enrichment with chat context
-- OpenTelemetry instrumentation
-- `pip install telegram-acp`
+A Python Telegram bot bridge for ACP. One subprocess can serve many chats, with one ACP session per chat.
 
 ### [`poc-site`](poc-site/)
 
-Landing page for Companion. Static HTML/CSS/JS, deployed to Vercel.
+A small static site for the Companion project. It is separate from the ACP runtime stack.
 
-### [`docs`](docs/)
+## Quick Start
 
-Deployment guides and operational documentation.
-
-## Getting started
-
-### Run a Telegram bot with acp-gateway
+Build and test the Rust workspace:
 
 ```sh
-# Build the gateway
-cd gateway/acp-gateway
-cargo build --release
-
-# Run telegram-acp with the gateway as the ACP backend
-cd connectors/telegram-acp
-uv sync
-
-TELEGRAM_BOT_TOKEN=your-token \
-telegram-acp --agent-cmd "acp-gateway --agent-cmd 'kiro-cli acp -a' --strategy dedicated"
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
-### Use acp-gateway with an editor
+Run the harness directly with the local example config:
 
 ```sh
-# In Zed's settings.json:
-{
-  "agent": {
-    "type": "custom",
-    "command": "acp-gateway",
-    "args": ["--agent-cmd", "kiro-cli acp -a", "--strategy", "dedicated"]
-  }
-}
+cargo run -p harness -- --config harness/examples/local.json
 ```
 
-## Design principles
+Run the gateway in front of the harness:
 
-- **ACP everywhere**: Connectors, gateway, and agents all speak the same open protocol. No proprietary internal APIs.
-- **Stateless processes**: Companion processes load config and execute prompts. Session state lives in the gateway and memory layer.
-- **Simple stack**: Containerized, cloud-portable, minimal managed services. No high-level AI service dependencies.
-- **Open components**: Connectors and infrastructure are standalone open-source packages, not Companion-specific.
+```sh
+cargo run -p acp-gateway -- \
+  --agent-cmd "cargo run -p harness -- --config /Users/igaray/projects/companion/repo/companion/harness/examples/local.json" \
+  --strategy dedicated \
+  --idle-timeout-secs 0
+```
+
+The example harness configs target Ollama-compatible local models at `http://localhost:11434/v1` and default to `llama3.1`.
 
 ## Coverage
 
@@ -105,10 +110,7 @@ Useful variants:
 ./scripts/coverage.sh --python-only
 ```
 
-This writes reports under [`coverage/`](/Users/igaray/projects/companion/repo/companion/coverage) when the needed local tools are installed:
-- Rust workspace coverage uses `cargo-llvm-cov`
-- Harness sandbox Python coverage uses `python -m trace`
-- Telegram connector coverage uses `uv` + `pytest-cov`
+Reports are written under [`coverage/`](coverage/).
 
 ## License
 

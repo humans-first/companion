@@ -1,175 +1,111 @@
 # telegram-acp
 
-A generic Telegram-to-ACP connector. Bridge any Telegram bot to any [ACP](https://agentclientprotocol.org/)-compatible agent backend.
+`telegram-acp` is a Telegram-to-ACP connector. It lets one Telegram bot talk to any ACP-compatible backend, including the gateway and harness in this repo.
 
-## Features
+## What It Does
 
-- **Single process, multiple sessions** -- one ACP subprocess serves all chats, each getting its own session
-- **Group support** -- responds when @mentioned or replied to; ignores other messages
-- **Message enrichment** -- sends chat context (title, type, reply-to) alongside user text
-- **Smart threading** -- replies inline only when newer messages have arrived
-- **OpenTelemetry instrumentation** -- traces and metrics out of the box (no-op without an SDK)
+- Spawns one ACP subprocess and reuses it across chats
+- Creates one ACP session per Telegram chat
+- Serializes prompts within a chat while allowing different chats to run concurrently
+- Responds in groups only when mentioned or when replying to the bot
+- Enriches prompts with chat and reply context before sending them downstream
+- Emits OpenTelemetry traces and metrics when an SDK is installed
 
-## Requirements
+The simplest topology is:
 
-- Python 3.11+
-- A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- An ACP-compatible agent (any command that speaks the [Agent Client Protocol](https://agentclientprotocol.org/))
+```text
+Telegram bot  <-->  telegram-acp  <-->  ACP backend
+                                    acp-gateway or harness
+```
 
 ## Install
 
-```bash
+```sh
 pip install telegram-acp
 ```
 
 Or from source:
 
-```bash
-cd connectors/telegram-acp
+```sh
 uv sync
 ```
 
 ## Configuration
 
-Settings are resolved in this order (highest priority first):
+Settings resolve in this order:
 
 1. CLI flags
 2. Environment variables
-3. `.env` file in the working directory
+3. `.env` in the working directory
 
-| Setting | CLI flag | Env var | Default | Description |
-|---|---|---|---|---|
-| Telegram token | `--token` | `TELEGRAM_TOKEN` | *(required)* | Bot token from @BotFather |
-| ACP server command | `--acp-cmd` | `ACP_SERVER_CMD` | `kiro cli acp` | Command to spawn the ACP agent subprocess |
-| Session mode | `--session-mode` | `ACP_SESSION_MODE` | `""` | ACP session mode to set after creation (e.g. `chat`) |
-| Allowed chats | `--allowed-chats` | `ALLOWED_CHATS` | `""` | Comma-separated chat IDs; empty means all chats |
-| Debug logging | `--debug` | `DEBUG_ACP` | `false` | Log raw ACP messages |
+| Setting | CLI flag | Env var | Default |
+|---|---|---|---|
+| Telegram token | `--token` | `TELEGRAM_TOKEN` | required |
+| ACP server command | `--acp-cmd` | `ACP_SERVER_CMD` | `kiro cli acp` |
+| ACP session mode | `--session-mode` | `ACP_SESSION_MODE` | empty |
+| Allowed chats | `--allowed-chats` | `ALLOWED_CHATS` | empty |
+| Debug ACP logging | `--debug` | `DEBUG_ACP` | `false` |
 
-Use `/chatid` in any Telegram chat to discover its ID (group IDs are negative numbers).
-
-### Examples
-
-Using a `.env` file:
-
-```bash
-cp .env.example .env
-# edit .env, set TELEGRAM_TOKEN at minimum
-telegram-acp
-```
-
-Using environment variables:
-
-```bash
-TELEGRAM_TOKEN=123:abc telegram-acp
-```
-
-Using CLI flags:
-
-```bash
-telegram-acp --token 123:abc --acp-cmd "my-agent serve" --debug
-```
-
-Mixing sources (CLI overrides env vars which override `.env`):
-
-```bash
-TELEGRAM_TOKEN=123:abc telegram-acp --debug --allowed-chats "111,-222"
-```
+One important detail: `ACP_SERVER_CMD` is treated as a space-separated argv list, not as a shell command line. If your backend launch needs nested quoting, wrap it in a small script and point `ACP_SERVER_CMD` at that script instead.
 
 ## Usage
 
-```bash
-telegram-acp
-# or
-uv run telegram-acp
+Run directly against the harness:
+
+```sh
+TELEGRAM_TOKEN=123:abc \
+telegram-acp --acp-cmd "/Users/igaray/projects/companion/repo/companion/harness/target/release/harness --config /Users/igaray/projects/companion/repo/companion/harness/examples/local.json"
 ```
 
-```
-$ telegram-acp --help
-usage: telegram-acp [-h] [--version] [--token TOKEN] [--acp-cmd ACP_CMD]
-                    [--session-mode SESSION_MODE]
-                    [--allowed-chats ALLOWED_CHATS] [--debug]
+Use `/chatid` in any chat to discover its ID. Group IDs are negative numbers.
 
-Bridge a Telegram bot to an ACP-compatible agent.
-```
+## Chat Behavior
 
-## Bot commands
+In private chats, every message is forwarded.
 
-| Command  | Description                         |
-|----------|-------------------------------------|
-| `/start` | Greeting                            |
-| `/reset` | Reset the ACP session for this chat |
-| `/chatid`| Print the current chat ID           |
+In groups and supergroups, the bot only responds when:
 
-## How it works
+- it is mentioned, or
+- the user replies to one of the bot's messages
 
-The connector spawns a single ACP subprocess and creates a separate session for each Telegram chat. Messages within a chat are serialized (one prompt at a time), but different chats can prompt concurrently.
+Before a prompt is sent downstream, the connector adds lightweight context such as:
 
-In **private chats**, every message is forwarded to the agent.
+- chat title and chat type
+- reply context
+- the Telegram user's display name
 
-In **groups**, the bot only responds when:
-- It is @mentioned in a message, or
-- A user replies to one of the bot's messages
+It also attaches ACP `_meta` describing the Telegram user and chat context.
 
-Before sending to the agent, the connector enriches the message with context:
+That metadata is useful downstream, but it is not the same shape as the Cedar-oriented `principal` / `action` / `resource` tuple that `acp-gateway` expects for prompt authorization. If you want to enforce gateway Cedar policies directly from Telegram traffic, you still need a metadata-mapping step.
 
-```
-[Chat: "Book Club" | supergroup]
-[Replying to Bob: "what about chapter 3?"]
-[Alice]: I loved the twist
-```
+## Bot Commands
 
-Responses longer than 4096 characters (Telegram's limit) are automatically split into multiple messages.
+| Command | Description |
+|---|---|
+| `/start` | Greeting |
+| `/reset` | Reset the ACP session for the current chat |
+| `/chatid` | Show the current chat ID |
 
 ## Observability
 
-The connector is instrumented with [OpenTelemetry](https://opentelemetry.io/) traces and metrics using the `opentelemetry-api` package. Without an OTel SDK installed, all instrumentation is no-op (zero overhead).
+The connector uses OpenTelemetry APIs for traces and metrics. Without an SDK installed, instrumentation is effectively no-op.
 
-To enable observability, install the SDK and an exporter:
+Typical spans include:
 
-```bash
-pip install opentelemetry-sdk opentelemetry-exporter-otlp
-```
-
-Then run with auto-instrumentation:
-
-```bash
-OTEL_SERVICE_NAME=telegram-acp \
-OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-opentelemetry-instrument telegram-acp
-```
-
-### Traces
-
-| Span | Key attributes |
-|------|----------------|
-| `telegram.handle_message` | `chat.id`, `chat.type`, `telegram.action` |
-| `telegram.respond` | `chat.id`, `chat.type`, `user.display_name`, `telegram.response_length`, `telegram.threaded` |
-| `acp.start` | `acp.cmd`, `acp.pid` |
-| `acp.new_session` | `chat.id`, `acp.session_id` |
-| `acp.prompt` | `chat.id`, `acp.session_id`, `acp.chunk_count` |
-| `acp.stop` | -- |
-
-### Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `telegram.messages.received` | Counter | Messages received, by `chat.type` |
-| `telegram.responses.sent` | Counter | Successful responses sent |
-| `telegram.responses.failures` | Counter | Failed response attempts |
-| `telegram.response.duration` | Histogram (s) | End-to-end latency per response |
-| `acp.prompt.duration` | Histogram (s) | ACP prompt round-trip time |
-| `acp.prompt.successes` | Counter | Successful ACP prompts |
-| `acp.prompt.failures` | Counter | Failed ACP prompts |
-| `acp.sessions.active` | UpDownCounter | Currently active sessions |
-| `acp.process.respawns` | Counter | ACP process respawn count |
+- `telegram.handle_message`
+- `telegram.respond`
+- `acp.start`
+- `acp.new_session`
+- `acp.prompt`
+- `acp.stop`
 
 ## Development
 
-```bash
+```sh
 uv sync
-uv run ruff check src/ tests/    # lint
-uv run mypy                       # type check
-uv run pytest --cov               # test with coverage
+uv run ruff check src/ tests/
+uv run mypy
+uv run pytest --cov
 ```
 
 ## License
