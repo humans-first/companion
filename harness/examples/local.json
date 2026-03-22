@@ -1,0 +1,11 @@
+{
+  "name": "local-agent",
+  "system_prompt": "You are a helpful coding assistant. Be concise and direct.",
+  "model": {
+    "model_id": "llama3.1",
+    "base_url": "http://localhost:11434/v1",
+    "api_key": null
+  },
+  "mcp_servers": {},
+  "tool_policy": "permit(principal, action, resource);"
+}

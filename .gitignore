@@ -19,6 +19,9 @@ htmlcov/
 # Node
 node_modules/
 
+# Rust
+target/
+
 # IDE
 .idea/
 .vscode/
