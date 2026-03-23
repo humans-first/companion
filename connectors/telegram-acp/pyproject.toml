@@ -20,6 +20,7 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "pydantic-settings>=2.0",
     "agent-client-protocol>=0.8.1",
+    "httpx>=0.28",
     "opentelemetry-api>=1.20",
 ]
 

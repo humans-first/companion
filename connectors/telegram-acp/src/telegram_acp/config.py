@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     # ACP server command (space-separated, will be split into argv)
     acp_server_cmd: str = "kiro cli acp"
 
+    # ACP HTTP transport base URL. When set, telegram-acp connects over HTTP(S)
+    # instead of spawning an ACP subprocess locally.
+    acp_server_url: str = ""
+
     # ACP session mode to set after session creation (e.g. "code", "chat").
     # Leave empty to use the agent's default mode.
     acp_session_mode: str = ""
@@ -30,3 +34,8 @@ class Settings(BaseSettings):
     @property
     def acp_server_argv(self) -> list[str]:
         return self.acp_server_cmd.split()
+
+    @property
+    def acp_server_base_url(self) -> str | None:
+        url = self.acp_server_url.strip()
+        return url or None

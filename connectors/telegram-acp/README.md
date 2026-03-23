@@ -4,11 +4,12 @@
 
 ## What It Does
 
-- Spawns one ACP subprocess and reuses it across chats
+- Reuses one ACP transport connection across chats
 - Creates one ACP session per Telegram chat
 - Serializes prompts within a chat while allowing different chats to run concurrently
 - Responds in groups only when mentioned or when replying to the bot
 - Enriches prompts with chat and reply context before sending them downstream
+- Supports both local stdio ACP backends and remote ACP-over-HTTP endpoints
 - Emits OpenTelemetry traces and metrics when an SDK is installed
 
 The simplest topology is:
@@ -42,19 +43,29 @@ Settings resolve in this order:
 |---|---|---|---|
 | Telegram token | `--token` | `TELEGRAM_TOKEN` | required |
 | ACP server command | `--acp-cmd` | `ACP_SERVER_CMD` | `kiro cli acp` |
+| ACP HTTP base URL | `--acp-url` | `ACP_SERVER_URL` | empty |
 | ACP session mode | `--session-mode` | `ACP_SESSION_MODE` | empty |
 | Allowed chats | `--allowed-chats` | `ALLOWED_CHATS` | empty |
 | Debug ACP logging | `--debug` | `DEBUG_ACP` | `false` |
 
-One important detail: `ACP_SERVER_CMD` is treated as a space-separated argv list, not as a shell command line. If your backend launch needs nested quoting, wrap it in a small script and point `ACP_SERVER_CMD` at that script instead.
+If `ACP_SERVER_URL` is set, the connector uses the repo's streamable ACP HTTP transport over `http://` or `https://` and does not spawn a local subprocess.
+
+If you stay on stdio, `ACP_SERVER_CMD` is treated as a space-separated argv list, not as a shell command line. If your backend launch needs nested quoting, wrap it in a small script and point `ACP_SERVER_CMD` at that script instead.
 
 ## Usage
 
-Run directly against the harness:
+Run directly against a local harness process:
 
 ```sh
 TELEGRAM_TOKEN=123:abc \
 telegram-acp --acp-cmd "/Users/igaray/projects/companion/repo/companion/harness/target/release/harness --config /Users/igaray/projects/companion/repo/companion/harness/examples/local.json"
+```
+
+Run against the gateway over HTTP:
+
+```sh
+TELEGRAM_TOKEN=123:abc \
+telegram-acp --acp-url "https://gateway.example.test"
 ```
 
 Use `/chatid` in any chat to discover its ID. Group IDs are negative numbers.

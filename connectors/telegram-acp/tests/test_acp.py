@@ -172,6 +172,24 @@ def _mock_spawn_sequential(session_ids):
     return fake_spawn, conn, proc
 
 
+def _mock_http_connect(conn=None, session_id="sess-http"):
+    """Create a mock HTTP ACP context manager."""
+    if conn is None:
+        conn = AsyncMock()
+        conn.initialize = AsyncMock()
+        session = SimpleNamespace(session_id=session_id)
+        conn.new_session = AsyncMock(return_value=session)
+        conn.set_session_mode = AsyncMock()
+        conn.prompt = AsyncMock()
+        conn.close = AsyncMock()
+
+    @asynccontextmanager
+    async def fake_connect(*_args, **_kwargs):
+        yield conn
+
+    return fake_connect, conn
+
+
 # ------------------------------------------------------------------ #
 # ACPManager — basic state                                             #
 # ------------------------------------------------------------------ #
@@ -249,6 +267,18 @@ class TestACPManagerLifecycle:
             await mgr.stop()
 
     @pytest.mark.asyncio
+    async def test_start_over_http(self):
+        fake_connect, conn = _mock_http_connect()
+        mgr = ACPManager(server_url="https://gateway.example.test")
+
+        with patch("telegram_acp.acp.connect_http_agent", fake_connect):
+            await mgr.start()
+            assert mgr._conn is conn
+            assert mgr._proc is None
+            conn.initialize.assert_awaited_once_with(protocol_version=1)
+            await mgr.stop()
+
+    @pytest.mark.asyncio
     async def test_start_without_session_mode_skips_set(self):
         fake_spawn, conn, _ = _mock_spawn()
         mgr = ACPManager(cmd=["test"], session_mode="")
@@ -298,7 +328,7 @@ class TestACPManagerLifecycle:
             await mgr.stop()
 
     @pytest.mark.asyncio
-    async def test_ensure_process_respawns(self):
+    async def test_ensure_connection_respawns(self):
         fake_spawn, _conn, _ = _mock_spawn()
         mgr = ACPManager(cmd=["test"])
 
@@ -310,15 +340,15 @@ class TestACPManagerLifecycle:
             await mgr.stop()
             assert not mgr._is_alive()
 
-            # _ensure_process should respawn
-            await mgr._ensure_process()
+            # _ensure_connection should respawn
+            await mgr._ensure_connection()
             assert mgr._is_alive()
             assert mgr._sessions == {}  # sessions cleared on respawn
 
             await mgr.stop()
 
     @pytest.mark.asyncio
-    async def test_ensure_process_noop_when_alive(self):
+    async def test_ensure_connection_noop_when_alive(self):
         fake_spawn, _, _ = _mock_spawn()
         mgr = ACPManager(cmd=["test"])
 
@@ -326,9 +356,27 @@ class TestACPManagerLifecycle:
             await mgr.start()
             ready_event = mgr._ready  # save reference
 
-            await mgr._ensure_process()
+            await mgr._ensure_connection()
             # Should not have replaced the event (no respawn happened)
             assert mgr._ready is ready_event
+
+            await mgr.stop()
+
+    @pytest.mark.asyncio
+    async def test_ensure_connection_respawns_http_backend(self):
+        fake_connect, _conn = _mock_http_connect()
+        mgr = ACPManager(server_url="https://gateway.example.test")
+
+        with patch("telegram_acp.acp.connect_http_agent", fake_connect):
+            await mgr.start()
+            mgr._sessions[100] = "old-session"
+
+            await mgr.stop()
+            assert not mgr._is_alive()
+
+            await mgr._ensure_connection()
+            assert mgr._is_alive()
+            assert mgr._sessions == {}
 
             await mgr.stop()
 
@@ -368,7 +416,7 @@ class TestACPManagerFailures:
         mgr = ACPManager(cmd=["test"])
         with (
             patch("telegram_acp.acp.spawn_agent_process", failing_spawn),
-            pytest.raises(ACPError, match="ACP process failed to start"),
+            pytest.raises(ACPError, match="ACP connection failed to start"),
         ):
             await mgr.start()
 
@@ -403,6 +451,16 @@ class TestACPManagerFailures:
             await mgr.stop()
             proc.kill.assert_called_once()
             proc.wait.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_stop_http_backend_skips_process_kill(self):
+        fake_connect, _conn = _mock_http_connect()
+        mgr = ACPManager(server_url="https://gateway.example.test")
+
+        with patch("telegram_acp.acp.connect_http_agent", fake_connect):
+            await mgr.start()
+            assert mgr._proc is None
+            await mgr.stop()
 
     @pytest.mark.asyncio
     async def test_stop_does_not_kill_already_exited_process(self):

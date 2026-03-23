@@ -621,6 +621,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
+    { name = "httpx" },
     { name = "opentelemetry-api" },
     { name = "pydantic-settings" },
     { name = "python-telegram-bot" },
@@ -638,6 +639,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", specifier = ">=0.8.1" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "pydantic-settings", specifier = ">=2.0" },
     { name = "python-telegram-bot", specifier = ">=21.0" },

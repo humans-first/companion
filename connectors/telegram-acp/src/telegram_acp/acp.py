@@ -1,15 +1,17 @@
 """
-ACPManager: single ACP process, multiple sessions (one per chat).
+ACPManager: single ACP connection, multiple sessions (one per chat).
 
-Spawns one ACP subprocess and creates sessions on demand as new chats arrive.
-Each chat gets its own session and its own lock, so concurrent chats can
-prompt in parallel while prompts within a single chat are serialized.
+Uses either a local ACP subprocess or the repo's HTTP transport and creates
+sessions on demand as new chats arrive. Each chat gets its own session and its
+own lock, so concurrent chats can prompt in parallel while prompts within a
+single chat are serialized.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -18,6 +20,7 @@ from typing import Any
 
 from acp import spawn_agent_process
 from acp.client.connection import ClientSideConnection
+from acp.connection import StreamEvent
 from acp.schema import (
     AgentMessageChunk,
     AudioContentBlock,
@@ -27,6 +30,8 @@ from acp.schema import (
     TextContentBlock,
 )
 from opentelemetry import metrics, trace
+
+from telegram_acp.http_transport import connect_http_agent
 
 ContentBlock = (
     TextContentBlock
@@ -53,9 +58,9 @@ prompt_failures = meter.create_counter(
     "acp.prompt.failures",
     description="Number of failed ACP prompts",
 )
-process_respawns = meter.create_counter(
-    "acp.process.respawns",
-    description="Number of times the ACP process was respawned",
+connection_respawns = meter.create_counter(
+    "acp.connection.respawns",
+    description="Number of times the ACP transport connection was re-established",
 )
 active_sessions = meter.create_up_down_counter(
     "acp.sessions.active",
@@ -134,10 +139,18 @@ class _BotClient:
 
 
 class ACPManager:
-    """Single ACP process managing multiple chat sessions."""
+    """Single ACP connection managing multiple chat sessions."""
 
-    def __init__(self, cmd: list[str], session_mode: str = "", *, debug: bool = False):
-        self.cmd = cmd
+    def __init__(
+        self,
+        cmd: list[str] | None = None,
+        *,
+        server_url: str | None = None,
+        session_mode: str = "",
+        debug: bool = False,
+    ):
+        self.cmd = cmd or []
+        self.server_url = server_url
         self.session_mode = session_mode
         self.debug = debug
         self._client = _BotClient()
@@ -150,48 +163,81 @@ class ACPManager:
         self._locks: dict[int, asyncio.Lock] = {}  # chat_id -> lock
 
     async def start(self) -> None:
-        """Spawn the ACP subprocess and wait until it's ready."""
+        """Open the ACP transport and wait until it's ready."""
         with tracer.start_as_current_span(
             "acp.start",
-            attributes={"acp.cmd": " ".join(self.cmd)},
+            attributes={
+                "acp.transport": self.transport_kind,
+                "acp.target": self.server_url or " ".join(self.cmd),
+            },
         ) as span:
             self._task = asyncio.create_task(self._run(), name="acp-manager")
             await self._ready.wait()
             if self._conn is None:
-                span.set_status(trace.StatusCode.ERROR, "ACP process failed to start")
-                raise ACPError("ACP process failed to start")
-            span.set_attribute("acp.pid", self._proc.pid if self._proc else -1)
+                span.set_status(trace.StatusCode.ERROR, "ACP connection failed to start")
+                raise ACPError("ACP connection failed to start")
+            if self._proc is not None:
+                span.set_attribute("acp.pid", self._proc.pid)
+
+    @property
+    def transport_kind(self) -> str:
+        return "http" if self.server_url else "stdio"
+
+    def _enable_debug_logging(self, conn: ClientSideConnection) -> None:
+        if not self.debug:
+            return
+
+        def log_raw_message(event: StreamEvent) -> None:
+            logger.debug("ACP %s %s", event.direction, json.dumps(event.message, sort_keys=True))
+
+        conn._conn.add_observer(log_raw_message)  # noqa: SLF001
+
+    @contextlib.asynccontextmanager
+    async def _open_connection(self) -> AsyncIterator[tuple[ClientSideConnection, Any | None]]:
+        if self.server_url:
+            async with connect_http_agent(self._client, self.server_url) as conn:
+                yield conn, None
+            return
+
+        if not self.cmd:
+            raise ACPError("ACP command is not configured")
+
+        async with spawn_agent_process(
+            self._client,  # type: ignore[arg-type]  # duck-typed ACP Client
+            self.cmd[0],
+            *self.cmd[1:],
+        ) as (conn, proc):
+            yield conn, proc
 
     async def _run(self) -> None:
         try:
-            async with (
-                spawn_agent_process(
-                    self._client,  # type: ignore[arg-type]  # duck-typed ACP Client
-                    self.cmd[0],
-                    *self.cmd[1:],
-                ) as (conn, proc)
-            ):
+            async with self._open_connection() as (conn, proc):
                 self._conn = conn
                 self._proc = proc
+                self._enable_debug_logging(conn)
                 await conn.initialize(protocol_version=1)
-                logger.info("ACP process ready (pid=%s)", proc.pid)
+                if proc is not None:
+                    logger.info("ACP stdio backend ready (pid=%s)", proc.pid)
+                else:
+                    logger.info("ACP HTTP backend ready (%s)", self.server_url)
                 self._ready.set()
                 await self._stop.wait()
         except Exception:
-            logger.exception("ACP subprocess error")
+            logger.exception("ACP backend error")
         finally:
             self._conn = None
+            self._proc = None
             if not self._ready.is_set():
                 self._ready.set()
 
     def _is_alive(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    async def _ensure_process(self) -> None:
-        """Respawn the ACP process if it died."""
+    async def _ensure_connection(self) -> None:
+        """Reconnect the ACP transport if it died."""
         if not self._is_alive():
-            logger.warning("ACP process not alive, respawning")
-            process_respawns.add(1)
+            logger.warning("ACP transport not alive, reconnecting")
+            connection_respawns.add(1)
             self._ready = asyncio.Event()
             self._stop = asyncio.Event()
             self._sessions.clear()
@@ -238,7 +284,7 @@ class ACPManager:
             "acp.prompt",
             attributes={"chat.id": chat_id},
         ) as span:
-            await self._ensure_process()
+            await self._ensure_connection()
             lock = self._get_lock(chat_id)
             t0 = time.monotonic()
             failed = False
@@ -288,8 +334,9 @@ class ACPManager:
             active_sessions.add(-1)
 
     async def stop(self) -> None:
-        """Shut down the ACP process."""
+        """Shut down the ACP transport."""
         with tracer.start_as_current_span("acp.stop"):
+            proc = self._proc
             self._stop.set()
             if self._task:
                 try:
@@ -298,7 +345,7 @@ class ACPManager:
                     self._task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await self._task
-            if self._proc and self._proc.returncode is None:
-                logger.warning("Force-killing ACP subprocess pid=%s", self._proc.pid)
-                self._proc.kill()
-                await self._proc.wait()
+            if proc and proc.returncode is None:
+                logger.warning("Force-killing ACP subprocess pid=%s", proc.pid)
+                proc.kill()
+                await proc.wait()

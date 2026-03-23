@@ -309,6 +309,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--token", help="Telegram bot token (env: TELEGRAM_TOKEN)")
     parser.add_argument("--acp-cmd", help="ACP server command (env: ACP_SERVER_CMD)")
+    parser.add_argument("--acp-url", help="ACP HTTP base URL (env: ACP_SERVER_URL)")
     parser.add_argument("--session-mode", help="ACP session mode (env: ACP_SESSION_MODE)")
     parser.add_argument("--allowed-chats", help="Comma-separated chat IDs (env: ALLOWED_CHATS)")
     parser.add_argument(
@@ -328,6 +329,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["telegram_token"] = args.token
     if args.acp_cmd is not None:
         overrides["acp_server_cmd"] = args.acp_cmd
+    if args.acp_url is not None:
+        overrides["acp_server_url"] = args.acp_url
     if args.session_mode is not None:
         overrides["acp_session_mode"] = args.session_mode
     if args.allowed_chats is not None:
@@ -344,6 +347,7 @@ def main(argv: list[str] | None = None) -> None:
 
     _acp = ACPManager(
         cmd=settings.acp_server_argv,
+        server_url=settings.acp_server_base_url,
         session_mode=settings.acp_session_mode,
         debug=settings.debug_acp,
     )

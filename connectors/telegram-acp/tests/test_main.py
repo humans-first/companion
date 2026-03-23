@@ -735,6 +735,7 @@ class TestParseArgs:
         args = main._parse_args([])
         assert args.token is None
         assert args.acp_cmd is None
+        assert args.acp_url is None
         assert args.session_mode is None
         assert args.allowed_chats is None
         assert args.debug is None
@@ -746,6 +747,8 @@ class TestParseArgs:
                 "abc:123",
                 "--acp-cmd",
                 "my-agent serve",
+                "--acp-url",
+                "https://gateway.example.test",
                 "--session-mode",
                 "chat",
                 "--allowed-chats",
@@ -755,6 +758,7 @@ class TestParseArgs:
         )
         assert args.token == "abc:123"
         assert args.acp_cmd == "my-agent serve"
+        assert args.acp_url == "https://gateway.example.test"
         assert args.session_mode == "chat"
         assert args.allowed_chats == "100,-200"
         assert args.debug is True
@@ -763,6 +767,7 @@ class TestParseArgs:
         args = main._parse_args(["--token", "xyz"])
         assert args.token == "xyz"
         assert args.acp_cmd is None
+        assert args.acp_url is None
         assert args.debug is None
 
     def test_debug_flag_is_store_true(self):
@@ -773,3 +778,39 @@ class TestParseArgs:
         with pytest.raises(SystemExit) as exc_info:
             main._parse_args(["--version"])
         assert exc_info.value.code == 0
+
+
+class TestMain:
+    def teardown_method(self):
+        main._acp = None
+        main._allowed = set()
+
+    def test_main_prefers_http_url_when_configured(self):
+        fake_app = MagicMock()
+        fake_builder = MagicMock()
+        fake_builder.token.return_value = fake_builder
+        fake_builder.post_init.return_value = fake_builder
+        fake_builder.post_shutdown.return_value = fake_builder
+        fake_builder.build.return_value = fake_app
+        fake_settings = MagicMock()
+        fake_settings.telegram_token = "test-token"
+        fake_settings.acp_server_argv = ["ignored", "cmd"]
+        fake_settings.acp_server_base_url = "https://gateway.example.test"
+        fake_settings.acp_session_mode = "ask"
+        fake_settings.debug_acp = False
+        fake_settings.allowed_chat_ids = {123}
+
+        with (
+            patch.object(main.Application, "builder", return_value=fake_builder),
+            patch.object(main, "ACPManager") as mock_manager,
+            patch.object(main, "Settings", return_value=fake_settings),
+        ):
+            main.main([])
+
+        mock_manager.assert_called_once_with(
+            cmd=["ignored", "cmd"],
+            server_url="https://gateway.example.test",
+            session_mode="ask",
+            debug=False,
+        )
+        fake_app.run_polling.assert_called_once_with(drop_pending_updates=True)
