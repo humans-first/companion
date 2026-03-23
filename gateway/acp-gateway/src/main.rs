@@ -1,5 +1,6 @@
 mod config;
 mod error;
+mod frontend_host;
 mod gateway;
 mod policy;
 mod pool;
@@ -8,14 +9,12 @@ mod spawn;
 #[cfg(test)]
 mod tests;
 
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp_http_transport::{ConnectionFactory, HttpTransportConfig, TransportPeer};
+use acp_http_transport::{ConnectionFactory, HttpTransportConfig, ServerTlsConfig};
 use clap::Parser;
 use config::{Config, Strategy, Transport};
-use futures::FutureExt as _;
 use pool::{AgentPool, PoolConfig};
 use service::GatewayService;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
@@ -34,6 +33,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     if config.http_max_buffered_messages == 0 {
         return Err("--http-max-buffered-messages must be at least 1".into());
+    }
+    if config.http_tls_cert.is_some() != config.http_tls_key.is_some() {
+        return Err("--http-tls-cert and --http-tls-key must be provided together".into());
     }
 
     // Initialize tracing to stderr (stdout is the ACP transport).
@@ -142,6 +144,13 @@ async fn run_http_gateway(
         listen_addr: config.http_bind,
         max_message_bytes: config.http_max_message_bytes,
         max_buffered_messages: config.http_max_buffered_messages,
+        tls: match (&config.http_tls_cert, &config.http_tls_key) {
+            (Some(cert_path), Some(key_path)) => Some(ServerTlsConfig {
+                cert_path: cert_path.clone(),
+                key_path: key_path.clone(),
+            }),
+            _ => None,
+        },
     };
     let factory = build_gateway_connection_factory(config.clone(), service.clone());
 
@@ -170,43 +179,7 @@ fn build_gateway_connection_factory(
     config: Arc<Config>,
     service: GatewayService,
 ) -> ConnectionFactory {
-    Rc::new(move || {
-        let config = config.clone();
-        let service = service.clone();
-
-        async move {
-            let (transport_side, gateway_side) = tokio::io::duplex(config.http_max_message_bytes * 2);
-            let (gateway_read, gateway_write) = tokio::io::split(gateway_side);
-            let (transport_read, transport_write) = tokio::io::split(transport_side);
-
-            let frontend_id = service.next_frontend_id();
-            let gateway_agent = gateway::GatewayAgent::new(service.clone(), frontend_id.clone());
-            let (upstream_conn, upstream_io) = agent_client_protocol::AgentSideConnection::new(
-                gateway_agent,
-                gateway_write.compat_write(),
-                gateway_read.compat(),
-                |fut| { tokio::task::spawn_local(fut); },
-            );
-            service.register_frontend(frontend_id.clone(), upstream_conn);
-
-            let upstream_task = tokio::task::spawn_local(async move {
-                if let Err(err) = upstream_io.await {
-                    error!(error = %err, "HTTP ACP upstream I/O error");
-                }
-            });
-
-            Ok(TransportPeer::new(
-                transport_read.compat(),
-                transport_write.compat_write(),
-                async move {
-                    upstream_task.abort();
-                    service.unregister_frontend(&frontend_id);
-                }
-                .boxed_local(),
-            ))
-        }
-        .boxed_local()
-    })
+    frontend_host::start(service, config.http_max_message_bytes * 2)
 }
 
 async fn build_gateway_service(

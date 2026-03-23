@@ -1,19 +1,12 @@
-use std::net::ToSocketAddrs;
-
 use bytes::Bytes;
-use futures::future::LocalBoxFuture;
-use futures::FutureExt as _;
-use http_body_util::{BodyExt as _, Empty, Full};
-use hyper::body::Incoming;
-use hyper::client::conn::http1;
-use hyper::header::CONTENT_TYPE;
-use hyper::{Method, Request, Response, StatusCode, Uri};
-use hyper_util::rt::TokioIo;
+use futures::future::BoxFuture;
+use futures::{FutureExt as _, StreamExt as _};
+use reqwest::header::CONTENT_TYPE;
+use reqwest::{StatusCode, Url};
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpStream;
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::TransportPeer;
 
@@ -38,38 +31,36 @@ pub async fn connect(config: ClientConfig) -> Result<TransportPeer, String> {
     }
 
     let endpoint = Endpoint::parse(&config.base_url)?;
-    let connection = create_connection(&endpoint).await?;
-    let (stream_body, stream_connection_task) =
-        open_stream(&endpoint, &connection.stream_path).await?;
+    let client = build_http_client()?;
+    let connection = create_connection(&client, &endpoint).await?;
+    let stream_response = open_stream(&client, &endpoint, &connection.stream_path).await?;
 
     let buffer_size = config.max_message_bytes.saturating_mul(2).max(1024);
     let (peer_reader, mut stream_writer) = tokio::io::duplex(buffer_size);
     let (mut message_reader, peer_writer) = tokio::io::duplex(buffer_size);
 
     let stream_task = tokio::task::spawn_local(async move {
-        let mut body = stream_body;
+        let mut body = stream_response.bytes_stream();
 
-        loop {
-            match body.frame().await {
-                Some(Ok(frame)) => {
-                    if let Ok(data) = frame.into_data() {
-                        if let Err(err) = stream_writer.write_all(&data).await {
-                            warn!(error = %err, "failed writing HTTP stream frame into transport");
-                            break;
-                        }
+        while let Some(frame) = body.next().await {
+            match frame {
+                Ok(data) => {
+                    if let Err(err) = stream_writer.write_all(&data).await {
+                        warn!(error = %err, "failed writing HTTP stream frame into transport");
+                        break;
                     }
                 }
-                Some(Err(err)) => {
+                Err(err) => {
                     warn!(error = %err, "HTTP ACP stream failed");
                     break;
                 }
-                None => break,
             }
         }
 
         let _ = stream_writer.shutdown().await;
     });
 
+    let client_for_messages = client.clone();
     let endpoint_for_messages = endpoint.clone();
     let messages_path = connection.messages_path.clone();
     let max_message_bytes = config.max_message_bytes;
@@ -92,8 +83,13 @@ pub async fn connect(config: ClientConfig) -> Result<TransportPeer, String> {
                         break;
                     }
 
-                    if let Err(err) =
-                        post_message(&endpoint_for_messages, &messages_path, Bytes::from(buffer.clone())).await
+                    if let Err(err) = post_message(
+                        &client_for_messages,
+                        &endpoint_for_messages,
+                        &messages_path,
+                        Bytes::from(buffer.clone()),
+                    )
+                    .await
                     {
                         warn!(error = %err, "failed forwarding outbound ACP request over HTTP");
                         break;
@@ -107,15 +103,15 @@ pub async fn connect(config: ClientConfig) -> Result<TransportPeer, String> {
         }
     });
 
+    let client_for_shutdown = client.clone();
     let endpoint_for_shutdown = endpoint.clone();
     let connection_id = connection.connection_id;
-    let shutdown: LocalBoxFuture<'static, ()> = async move {
+    let shutdown: BoxFuture<'static, ()> = async move {
         message_task.abort();
         stream_task.abort();
-        stream_connection_task.abort();
-        let _ = delete_connection(&endpoint_for_shutdown, &connection_id).await;
+        let _ = delete_connection(&client_for_shutdown, &endpoint_for_shutdown, &connection_id).await;
     }
-    .boxed_local();
+    .boxed();
 
     Ok(TransportPeer::new(
         peer_reader.compat(),
@@ -126,55 +122,42 @@ pub async fn connect(config: ClientConfig) -> Result<TransportPeer, String> {
 
 #[derive(Clone)]
 struct Endpoint {
-    base_url: String,
-    host: String,
-    port: u16,
+    base_url: Url,
 }
 
 impl Endpoint {
     fn parse(base_url: &str) -> Result<Self, String> {
-        let normalized = base_url.trim_end_matches('/').to_string();
-        let uri: Uri = normalized
-            .parse()
-            .map_err(|e| format!("invalid base_url '{base_url}': {e}"))?;
-        let scheme = uri
-            .scheme_str()
-            .ok_or_else(|| "base_url must include a scheme".to_string())?;
-        if scheme != "http" {
-            return Err(format!("unsupported scheme '{scheme}', only http is supported"));
+        let normalized = base_url.trim_end_matches('/');
+        let url =
+            Url::parse(normalized).map_err(|e| format!("invalid base_url '{base_url}': {e}"))?;
+        match url.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(format!(
+                    "unsupported scheme '{scheme}', only http and https are supported"
+                ))
+            }
         }
-        if uri.query().is_some() {
+        if url.query().is_some() {
             return Err("base_url must not include a query".to_string());
         }
-        let host = uri
-            .host()
-            .ok_or_else(|| "base_url must include a host".to_string())?
-            .to_string();
-        let port = uri.port_u16().unwrap_or(80);
-        Ok(Self {
-            base_url: normalized,
-            host,
-            port,
-        })
+        if url.host_str().is_none() {
+            return Err("base_url must include a host".to_string());
+        }
+        Ok(Self { base_url: url })
     }
 
-    fn uri(&self, path: &str) -> Result<Uri, String> {
-        format!("{}{}", self.base_url, path)
-            .parse()
-            .map_err(|e| format!("failed to build URI for path '{path}': {e}"))
+    fn url(&self, path: &str) -> Result<Url, String> {
+        self.base_url
+            .join(path)
+            .map_err(|e| format!("failed to build URL for path '{path}': {e}"))
     }
+}
 
-    async fn connect_stream(&self) -> Result<TcpStream, String> {
-        let mut addrs = (self.host.as_str(), self.port)
-            .to_socket_addrs()
-            .map_err(|e| format!("failed to resolve {}:{}: {e}", self.host, self.port))?;
-        let addr = addrs
-            .next()
-            .ok_or_else(|| format!("no socket addresses found for {}:{}", self.host, self.port))?;
-        TcpStream::connect(addr)
-            .await
-            .map_err(|e| format!("failed to connect to {}: {e}", addr))
-    }
+fn build_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))
 }
 
 #[derive(Deserialize)]
@@ -184,15 +167,20 @@ struct CreateConnectionResponse {
     stream_path: String,
 }
 
-async fn create_connection(endpoint: &Endpoint) -> Result<CreateConnectionResponse, String> {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(endpoint.uri("/v1/acp/connections")?)
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| format!("failed to build create-connection request: {e}"))?;
-    let response = send_request(endpoint, request).await?;
+async fn create_connection(
+    client: &reqwest::Client,
+    endpoint: &Endpoint,
+) -> Result<CreateConnectionResponse, String> {
+    let response = client
+        .post(endpoint.url("/v1/acp/connections")?)
+        .send()
+        .await
+        .map_err(|e| format!("failed to create connection: {e}"))?;
     let status = response.status();
-    let body = collect_body(response).await?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read create-connection response body: {e}"))?;
     if status != StatusCode::CREATED {
         return Err(format!(
             "create-connection failed with status {}: {}",
@@ -200,55 +188,53 @@ async fn create_connection(endpoint: &Endpoint) -> Result<CreateConnectionRespon
             String::from_utf8_lossy(&body)
         ));
     }
-    serde_json::from_slice(&body).map_err(|e| format!("failed to parse create-connection response: {e}"))
+    serde_json::from_slice(&body)
+        .map_err(|e| format!("failed to parse create-connection response: {e}"))
 }
 
 async fn open_stream(
+    client: &reqwest::Client,
     endpoint: &Endpoint,
     stream_path: &str,
-) -> Result<(Incoming, tokio::task::JoinHandle<()>), String> {
-    let stream = endpoint.connect_stream().await?;
-    let io = TokioIo::new(stream);
-    let (mut sender, connection) = http1::handshake(io)
-        .await
-        .map_err(|e| format!("failed to open HTTP stream connection: {e}"))?;
-    let connection_task = tokio::task::spawn_local(async move {
-        if let Err(err) = connection.await {
-            debug!(error = %err, "HTTP stream connection closed");
-        }
-    });
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(endpoint.uri(stream_path)?)
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| format!("failed to build stream request: {e}"))?;
-    let response = sender
-        .send_request(request)
+) -> Result<reqwest::Response, String> {
+    let response = client
+        .get(endpoint.url(stream_path)?)
+        .send()
         .await
         .map_err(|e| format!("failed to open stream: {e}"))?;
     if response.status() != StatusCode::OK {
         let status = response.status();
-        let body = collect_body(response).await?;
-        connection_task.abort();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| format!("failed to read stream error body: {e}"))?;
         return Err(format!(
             "stream connection failed with status {}: {}",
             status,
             String::from_utf8_lossy(&body)
         ));
     }
-    Ok((response.into_body(), connection_task))
+    Ok(response)
 }
 
-async fn post_message(endpoint: &Endpoint, messages_path: &str, body: Bytes) -> Result<(), String> {
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(endpoint.uri(messages_path)?)
+async fn post_message(
+    client: &reqwest::Client,
+    endpoint: &Endpoint,
+    messages_path: &str,
+    body: Bytes,
+) -> Result<(), String> {
+    let response = client
+        .post(endpoint.url(messages_path)?)
         .header(CONTENT_TYPE, "application/json")
-        .body(Full::new(body))
-        .map_err(|e| format!("failed to build message request: {e}"))?;
-    let response = send_request(endpoint, request).await?;
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("failed to post message: {e}"))?;
     let status = response.status();
-    let response_body = collect_body(response).await?;
+    let response_body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read message response body: {e}"))?;
     if status != StatusCode::ACCEPTED {
         return Err(format!(
             "message post failed with status {}: {}",
@@ -259,15 +245,21 @@ async fn post_message(endpoint: &Endpoint, messages_path: &str, body: Bytes) -> 
     Ok(())
 }
 
-async fn delete_connection(endpoint: &Endpoint, connection_id: &str) -> Result<(), String> {
-    let request = Request::builder()
-        .method(Method::DELETE)
-        .uri(endpoint.uri(&format!("/v1/acp/connections/{connection_id}"))?)
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| format!("failed to build delete request: {e}"))?;
-    let response = send_request(endpoint, request).await?;
+async fn delete_connection(
+    client: &reqwest::Client,
+    endpoint: &Endpoint,
+    connection_id: &str,
+) -> Result<(), String> {
+    let response = client
+        .delete(endpoint.url(&format!("/v1/acp/connections/{connection_id}"))?)
+        .send()
+        .await
+        .map_err(|e| format!("failed to delete connection: {e}"))?;
     let status = response.status();
-    let body = collect_body(response).await?;
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read delete response body: {e}"))?;
     match status {
         StatusCode::NO_CONTENT | StatusCode::NOT_FOUND => Ok(()),
         _ => Err(format!(
@@ -276,38 +268,6 @@ async fn delete_connection(endpoint: &Endpoint, connection_id: &str) -> Result<(
             String::from_utf8_lossy(&body)
         )),
     }
-}
-
-async fn send_request<B>(endpoint: &Endpoint, request: Request<B>) -> Result<Response<Incoming>, String>
-where
-    B: hyper::body::Body<Data = Bytes> + Unpin + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
-    let stream = endpoint.connect_stream().await?;
-    let io = TokioIo::new(stream);
-    let (mut sender, connection) = http1::handshake(io)
-        .await
-        .map_err(|e| format!("failed to open HTTP connection: {e}"))?;
-    let connection_task = tokio::task::spawn_local(async move {
-        if let Err(err) = connection.await {
-            debug!(error = %err, "HTTP request connection closed");
-        }
-    });
-    let response = sender
-        .send_request(request)
-        .await
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-    connection_task.abort();
-    Ok(response)
-}
-
-async fn collect_body(response: Response<Incoming>) -> Result<Bytes, String> {
-    response
-        .into_body()
-        .collect()
-        .await
-        .map(|collected| collected.to_bytes())
-        .map_err(|e| format!("failed to read HTTP response body: {e}"))
 }
 
 fn trim_newline(buffer: &mut Vec<u8>) {

@@ -52,6 +52,14 @@ pub struct Config {
     /// Maximum buffered outbound ACP messages per HTTP connection.
     #[arg(long, default_value_t = 256)]
     pub http_max_buffered_messages: usize,
+
+    /// PEM-encoded certificate chain for HTTPS transport mode.
+    #[arg(long)]
+    pub http_tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded private key for HTTPS transport mode.
+    #[arg(long)]
+    pub http_tls_key: Option<PathBuf>,
 }
 
 /// Load balancing strategy for routing sessions to agent processes.

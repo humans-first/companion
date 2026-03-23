@@ -62,6 +62,13 @@ Run it over HTTP:
 
 The HTTP surface is provided by [`acp-http-transport`](../../acp-http-transport/).
 
+Enable HTTPS on the gateway transport by adding:
+
+```sh
+  --http-tls-cert /path/to/cert.pem \
+  --http-tls-key /path/to/key.pem
+```
+
 ## Strategies
 
 ### `dedicated`
@@ -126,7 +133,7 @@ This is a custom transport layer for ACP, not a replacement for ACP itself.
 - Transparent reload only works as well as the backend's `load_session` and `resume_session` support.
 - The current harness binary uses an in-memory session store by default, so if you want stable continuity through restarts or eviction, that storage layer still needs to arrive first.
 - Unscoped backend extension callbacks are ambiguous when multiple frontends are connected, so those flows are only safe when one frontend is attached.
-- HTTP mode currently provides transport, not TLS termination or gateway-level authentication.
+- HTTP mode can now terminate TLS directly, but it still does not provide gateway-level authentication by itself.
 
 ## Unstable ACP Methods
 

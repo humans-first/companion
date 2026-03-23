@@ -1,22 +1,20 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::rc::Rc;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use axum::body::{to_bytes, Body};
+use axum::extract::{Path, Request, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::Response;
+use axum::routing::{delete, get, post};
+use axum::Router;
 use bytes::Bytes;
-use futures::future::LocalBoxFuture;
+use futures::future::BoxFuture;
 use futures::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use futures::lock::Mutex;
 use futures::stream;
-use http_body_util::{BodyExt as _, Full, StreamBody};
-use hyper::body::{Frame, Incoming};
-use hyper::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
@@ -24,17 +22,22 @@ use uuid::Uuid;
 
 use crate::{BoxAsyncRead, BoxAsyncWrite, TransportPeer};
 
-type HttpBody = http_body_util::combinators::UnsyncBoxBody<Bytes, Infallible>;
+#[derive(Clone, Debug)]
+pub struct ServerTlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+}
 
 #[derive(Clone, Debug)]
 pub struct HttpTransportConfig {
     pub listen_addr: SocketAddr,
     pub max_message_bytes: usize,
     pub max_buffered_messages: usize,
+    pub tls: Option<ServerTlsConfig>,
 }
 
 pub type ConnectionFactory =
-    Rc<dyn Fn() -> LocalBoxFuture<'static, Result<TransportPeer, String>>>;
+    Arc<dyn Fn() -> BoxFuture<'static, Result<TransportPeer, String>> + Send + Sync>;
 
 pub async fn serve(
     listener: TcpListener,
@@ -45,30 +48,46 @@ pub async fn serve(
     info!(
         configured_addr = %config.listen_addr,
         listen_addr = %local_addr,
+        tls = config.tls.is_some(),
         "HTTP ACP transport listening"
     );
 
-    let state = Rc::new(HttpTransportState::new(config, factory));
+    let state = Arc::new(HttpTransportState::new(config.clone(), factory));
+    let router = Router::new()
+        .route("/v1/acp/connections", post(create_connection_response))
+        .route(
+            "/v1/acp/connections/{id}",
+            delete(delete_connection_response),
+        )
+        .route(
+            "/v1/acp/connections/{id}/messages",
+            post(post_message_response),
+        )
+        .route("/v1/acp/connections/{id}/stream", get(stream_response))
+        .with_state(state);
 
-    loop {
-        let (stream, peer_addr) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let state = state.clone();
-
-        tokio::task::spawn_local(async move {
-            let service = service_fn(move |request| handle_request(state.clone(), request));
-
-            if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                warn!(peer_addr = %peer_addr, error = %err, "HTTP ACP transport connection error");
-            }
-        });
+    if let Some(tls) = config.tls {
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            tls.cert_path,
+            tls.key_path,
+        )
+        .await
+        .map_err(std::io::Error::other)?;
+        axum_server::from_tcp_rustls(listener.into_std()?, tls_config)
+            .serve(router.into_make_service())
+            .await
+            .map_err(std::io::Error::other)
+    } else {
+        axum::serve(listener, router)
+            .await
+            .map_err(std::io::Error::other)
     }
 }
 
 struct HttpTransportState {
     config: HttpTransportConfig,
     factory: ConnectionFactory,
-    connections: RefCell<HashMap<String, Rc<HttpTransportConnection>>>,
+    connections: tokio::sync::Mutex<HashMap<String, Arc<HttpTransportConnection>>>,
 }
 
 impl HttpTransportState {
@@ -76,7 +95,7 @@ impl HttpTransportState {
         Self {
             config,
             factory,
-            connections: RefCell::new(HashMap::new()),
+            connections: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -88,16 +107,16 @@ impl HttpTransportState {
             self.config.max_buffered_messages,
         );
         let id = Uuid::now_v7().to_string();
-        self.connections.borrow_mut().insert(id.clone(), connection);
+        self.connections.lock().await.insert(id.clone(), connection);
         Ok(id)
     }
 
-    fn get_connection(&self, id: &str) -> Option<Rc<HttpTransportConnection>> {
-        self.connections.borrow().get(id).cloned()
+    async fn get_connection(&self, id: &str) -> Option<Arc<HttpTransportConnection>> {
+        self.connections.lock().await.get(id).cloned()
     }
 
     async fn delete_connection(&self, id: &str) -> bool {
-        let connection = self.connections.borrow_mut().remove(id);
+        let connection = self.connections.lock().await.remove(id);
         if let Some(connection) = connection {
             connection.close().await;
             true
@@ -108,10 +127,10 @@ impl HttpTransportState {
 }
 
 struct HttpTransportConnection {
-    writer: Mutex<Option<BoxAsyncWrite>>,
+    writer: tokio::sync::Mutex<Option<BoxAsyncWrite>>,
     outbound: Arc<OutboundBuffer>,
-    shutdown: RefCell<Option<LocalBoxFuture<'static, ()>>>,
-    io_tasks: RefCell<Vec<tokio::task::JoinHandle<()>>>,
+    shutdown: tokio::sync::Mutex<Option<BoxFuture<'static, ()>>>,
+    io_tasks: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
     max_message_bytes: usize,
 }
 
@@ -120,22 +139,22 @@ impl HttpTransportConnection {
         peer: TransportPeer,
         max_message_bytes: usize,
         max_buffered_messages: usize,
-    ) -> Rc<Self> {
+    ) -> Arc<Self> {
         let outbound = Arc::new(OutboundBuffer::new(max_buffered_messages));
-        let this = Rc::new(Self {
-            writer: Mutex::new(Some(peer.writer)),
+        let this = Arc::new(Self {
+            writer: tokio::sync::Mutex::new(Some(peer.writer)),
             outbound: outbound.clone(),
-            shutdown: RefCell::new(Some(peer.shutdown)),
-            io_tasks: RefCell::new(Vec::new()),
+            shutdown: tokio::sync::Mutex::new(Some(peer.shutdown)),
+            io_tasks: StdMutex::new(Vec::new()),
             max_message_bytes,
         });
 
         let reader = peer.reader;
         let connection = this.clone();
-        let pump_task = tokio::task::spawn_local(async move {
+        let pump_task = tokio::spawn(async move {
             connection.pump_outbound(reader).await;
         });
-        this.io_tasks.borrow_mut().push(pump_task);
+        this.io_tasks.lock().unwrap().push(pump_task);
 
         this
     }
@@ -168,13 +187,16 @@ impl HttpTransportConnection {
             }
         }
 
-        for task in self.io_tasks.borrow_mut().drain(..) {
-            task.abort();
+        {
+            let mut io_tasks = self.io_tasks.lock().unwrap();
+            for task in io_tasks.drain(..) {
+                task.abort();
+            }
         }
 
         self.outbound.close();
 
-        let shutdown = self.shutdown.borrow_mut().take();
+        let shutdown = self.shutdown.lock().await.take();
         if let Some(shutdown) = shutdown {
             shutdown.await;
         }
@@ -204,7 +226,7 @@ impl HttpTransportConnection {
 
         self.outbound.close();
 
-        let shutdown = self.shutdown.borrow_mut().take();
+        let shutdown = self.shutdown.lock().await.take();
         if let Some(shutdown) = shutdown {
             shutdown.await;
         }
@@ -305,29 +327,7 @@ impl Drop for StreamLease {
     }
 }
 
-async fn handle_request(
-    state: Rc<HttpTransportState>,
-    request: Request<Incoming>,
-) -> Result<Response<HttpBody>, Infallible> {
-    let response = match (request.method(), request.uri().path()) {
-        (&Method::POST, "/v1/acp/connections") => create_connection_response(state).await,
-        _ => match parse_connection_route(request.uri().path()) {
-            Some(ConnectionRoute::Stream(id)) if request.method() == Method::GET => {
-                stream_response(state, id).await
-            }
-            Some(ConnectionRoute::Messages(id)) if request.method() == Method::POST => {
-                post_message_response(state, id, request).await
-            }
-            Some(ConnectionRoute::Connection(id)) if request.method() == Method::DELETE => {
-                delete_connection_response(state, id).await
-            }
-            _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "not found"),
-        },
-    };
-    Ok(response)
-}
-
-async fn create_connection_response(state: Rc<HttpTransportState>) -> Response<HttpBody> {
+async fn create_connection_response(State(state): State<Arc<HttpTransportState>>) -> Response {
     match state.create_connection().await {
         Ok(id) => {
             let body = serde_json::json!({
@@ -339,7 +339,7 @@ async fn create_connection_response(state: Rc<HttpTransportState>) -> Response<H
 
             let mut response = response(StatusCode::CREATED, "application/json", body);
             if let Ok(value) =
-                hyper::header::HeaderValue::from_str(&format!("/v1/acp/connections/{id}"))
+                HeaderValue::from_str(&format!("/v1/acp/connections/{id}"))
             {
                 response.headers_mut().insert(LOCATION, value);
             }
@@ -353,8 +353,11 @@ async fn create_connection_response(state: Rc<HttpTransportState>) -> Response<H
     }
 }
 
-async fn stream_response(state: Rc<HttpTransportState>, id: String) -> Response<HttpBody> {
-    let Some(connection) = state.get_connection(&id) else {
+async fn stream_response(
+    State(state): State<Arc<HttpTransportState>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(connection) = state.get_connection(&id).await else {
         return response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "unknown connection");
     };
 
@@ -375,41 +378,47 @@ async fn stream_response(state: Rc<HttpTransportState>, id: String) -> Response<
         buffer
             .next_message()
             .await
-            .map(|message| (Ok::<_, Infallible>(Frame::data(message)), (buffer, lease)))
+            .map(|message| (Ok::<_, Infallible>(message), (buffer, lease)))
     });
 
-    let mut response = Response::new(http_body_util::combinators::UnsyncBoxBody::new(
-        StreamBody::new(stream),
-    ));
+    let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         CONTENT_TYPE,
-        hyper::header::HeaderValue::from_static("application/x-ndjson"),
+        HeaderValue::from_static("application/x-ndjson"),
     );
     response.headers_mut().insert(
         CACHE_CONTROL,
-        hyper::header::HeaderValue::from_static("no-store"),
+        HeaderValue::from_static("no-store"),
     );
     response
 }
 
 async fn post_message_response(
-    state: Rc<HttpTransportState>,
-    id: String,
-    request: Request<Incoming>,
-) -> Response<HttpBody> {
-    let Some(connection) = state.get_connection(&id) else {
+    State(state): State<Arc<HttpTransportState>>,
+    Path(id): Path<String>,
+    request: Request,
+) -> Response {
+    let Some(connection) = state.get_connection(&id).await else {
         return response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "unknown connection");
     };
 
-    let body = match request.into_body().collect().await {
-        Ok(body) => body.to_bytes(),
+    let body = match to_bytes(request.into_body(), state.config.max_message_bytes + 1).await {
+        Ok(body) => body,
         Err(err) => {
+            let text = err.to_string();
+            if text.contains("length limit exceeded") {
+                return response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "text/plain; charset=utf-8",
+                    "message exceeds configured limit",
+                );
+            }
             return response(
                 StatusCode::BAD_REQUEST,
                 "text/plain; charset=utf-8",
                 format!("failed to read body: {err}"),
-            )
+            );
         }
     };
 
@@ -444,7 +453,10 @@ async fn post_message_response(
     }
 }
 
-async fn delete_connection_response(state: Rc<HttpTransportState>, id: String) -> Response<HttpBody> {
+async fn delete_connection_response(
+    State(state): State<Arc<HttpTransportState>>,
+    Path(id): Path<String>,
+) -> Response {
     if state.delete_connection(&id).await {
         response(StatusCode::NO_CONTENT, "text/plain; charset=utf-8", "")
     } else {
@@ -456,33 +468,11 @@ fn response(
     status: StatusCode,
     content_type: &'static str,
     body: impl Into<Bytes>,
-) -> Response<HttpBody> {
-    let mut response = Response::new(http_body_util::combinators::UnsyncBoxBody::new(
-        Full::new(body.into()),
-    ));
+) -> Response {
+    let mut response = Response::new(Body::from(body.into()));
     *response.status_mut() = status;
-    response.headers_mut().insert(
-        CONTENT_TYPE,
-        hyper::header::HeaderValue::from_static(content_type),
-    );
     response
-}
-
-enum ConnectionRoute {
-    Connection(String),
-    Messages(String),
-    Stream(String),
-}
-
-fn parse_connection_route(path: &str) -> Option<ConnectionRoute> {
-    let prefix = "/v1/acp/connections/";
-    let remainder = path.strip_prefix(prefix)?;
-    let mut parts = remainder.split('/');
-    let id = parts.next()?.to_string();
-    match parts.next() {
-        None => Some(ConnectionRoute::Connection(id)),
-        Some("messages") if parts.next().is_none() => Some(ConnectionRoute::Messages(id)),
-        Some("stream") if parts.next().is_none() => Some(ConnectionRoute::Stream(id)),
-        _ => None,
-    }
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
 }

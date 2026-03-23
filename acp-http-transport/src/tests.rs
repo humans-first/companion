@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::sync::Arc;
 use agent_client_protocol::{self as acp, Agent as _};
 use bytes::Bytes;
 use futures::FutureExt as _;
@@ -7,7 +7,7 @@ use hyper::client::conn::http1;
 use hyper::{Request, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
@@ -188,6 +188,35 @@ impl ManualServerHarness {
     }
 }
 
+fn local_connection_factory(
+    builder: impl Fn() -> Result<TransportPeer, String> + 'static,
+) -> ConnectionFactory {
+    let (request_tx, mut request_rx) = mpsc::unbounded_channel::<
+        oneshot::Sender<Result<TransportPeer, String>>,
+    >();
+
+    tokio::task::spawn_local(async move {
+        while let Some(reply) = request_rx.recv().await {
+            let _ = reply.send(builder());
+        }
+    });
+
+    let request_tx = Arc::new(request_tx);
+    Arc::new(move || {
+        let request_tx = request_tx.clone();
+        async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            request_tx
+                .send(reply_tx)
+                .map_err(|_| "local connection factory is closed".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "local connection factory dropped the reply".to_string())?
+        }
+        .boxed()
+    })
+}
+
 async fn start_manual_server(
     max_message_bytes: usize,
     max_buffered_messages: usize,
@@ -196,7 +225,7 @@ async fn start_manual_server(
     let addr = listener.local_addr().unwrap();
     let (handles_tx, handles_rx) = mpsc::unbounded_channel();
 
-    let factory: ConnectionFactory = Rc::new(move || {
+    let factory: ConnectionFactory = Arc::new(move || {
         let handles_tx = handles_tx.clone();
         async move {
             let (transport_reader, outbound_writer) = tokio::io::duplex(64 * 1024);
@@ -212,10 +241,10 @@ async fn start_manual_server(
             Ok(TransportPeer::new(
                 transport_reader.compat(),
                 transport_writer.compat_write(),
-                async {}.boxed_local(),
+                async {}.boxed(),
             ))
         }
-        .boxed_local()
+        .boxed()
     });
 
     let server = tokio::task::spawn_local(async move {
@@ -225,6 +254,7 @@ async fn start_manual_server(
                 listen_addr: addr,
                 max_message_bytes,
                 max_buffered_messages,
+                tls: None,
             },
             factory,
         )
@@ -247,8 +277,7 @@ async fn test_client_and_server_round_trip_initialize() {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
 
-            let factory: ConnectionFactory = Rc::new(move || {
-                async move {
+            let factory = local_connection_factory(move || {
                     let (http_side, agent_side) = tokio::io::duplex(64 * 1024);
                     let (agent_read, agent_write) = tokio::io::split(agent_side);
                     let (http_read, http_write) = tokio::io::split(http_side);
@@ -272,10 +301,8 @@ async fn test_client_and_server_round_trip_initialize() {
                         async move {
                             io_handle.abort();
                         }
-                        .boxed_local(),
+                        .boxed(),
                     ))
-                }
-                .boxed_local()
             });
 
             let server = tokio::task::spawn_local(async move {
@@ -285,6 +312,7 @@ async fn test_client_and_server_round_trip_initialize() {
                         listen_addr: addr,
                         max_message_bytes: 64 * 1024,
                         max_buffered_messages: 16,
+                        tls: None,
                     },
                     factory,
                 )
@@ -338,8 +366,7 @@ async fn test_server_buffers_messages_before_stream_attach() {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
 
-            let factory: ConnectionFactory = Rc::new(move || {
-                async move {
+            let factory = local_connection_factory(move || {
                     let (http_side, agent_side) = tokio::io::duplex(64 * 1024);
                     let (agent_read, agent_write) = tokio::io::split(agent_side);
                     let (http_read, http_write) = tokio::io::split(http_side);
@@ -363,10 +390,8 @@ async fn test_server_buffers_messages_before_stream_attach() {
                         async move {
                             io_handle.abort();
                         }
-                        .boxed_local(),
+                        .boxed(),
                     ))
-                }
-                .boxed_local()
             });
 
             let server = tokio::task::spawn_local(async move {
@@ -376,6 +401,7 @@ async fn test_server_buffers_messages_before_stream_attach() {
                         listen_addr: addr,
                         max_message_bytes: 64 * 1024,
                         max_buffered_messages: 16,
+                        tls: None,
                     },
                     factory,
                 )
@@ -459,15 +485,13 @@ async fn test_connect_rejects_zero_max_message_bytes() {
 }
 
 #[tokio::test]
-async fn test_connect_rejects_non_http_base_url() {
-    let err = match connect(ClientConfig::new("https://example.com"))
-        .await
-    {
-        Ok(_) => panic!("expected non-http base_url to be rejected"),
+async fn test_connect_rejects_non_http_or_https_base_url() {
+    let err = match connect(ClientConfig::new("ftp://example.com")).await {
+        Ok(_) => panic!("expected unsupported base_url to be rejected"),
         Err(err) => err,
     };
 
-    assert!(err.contains("only http is supported"));
+    assert!(err.contains("only http and https are supported"));
 }
 
 #[tokio::test]
